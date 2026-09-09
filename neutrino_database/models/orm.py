@@ -20,6 +20,7 @@ from neutrino_database.models.enums import (
     DashboardWidgetTypeEnum,
     EstateScopeKindEnum,
     ExcelDatasetStatus,
+    ExecutionProposalStatusEnum,
     IdpProviderEnum,
     IntegrationAuthKindEnum,
     IntegrationEnablementStatusEnum,
@@ -1664,6 +1665,39 @@ class WorkflowRevision(Base):
     graph: Mapped[dict]
     input_schema: Mapped[dict]
     created_by: Mapped[Optional[str]]
+    created_at: Mapped[datetime]
+
+
+class ExecutionProposal(Base):
+    """An agent-proposed execution awaiting a human decision (ITOps merge §4.1).
+
+    The unit of approval. The row freezes the exact ``graph``, the resolved
+    ``inputs`` and the targets they name, and ``digest`` is a sha256 over that
+    pair; the decision binds to the digest, so a changed procedure or target is
+    a new proposal rather than a re-decision of this one. ``workflow_id`` /
+    ``revision_id`` are NULL for a one-off the agent composed. Credentials never
+    land here — connector binding IDs and script bodies do, so a run stays
+    reviewable and repeatable.
+    """
+
+    __table__ = tables.execution_proposal
+
+    id: Mapped[str]
+    tenant_id: Mapped[str]
+    workspace_id: Mapped[str]
+    workflow_id: Mapped[Optional[str]]
+    revision_id: Mapped[Optional[str]]
+    chat_id: Mapped[Optional[str]]
+    graph: Mapped[dict]
+    inputs: Mapped[dict]
+    preview: Mapped[dict]
+    digest: Mapped[str]
+    status: Mapped[ExecutionProposalStatusEnum]
+    requested_by: Mapped[Optional[str]]
+    decided_by: Mapped[Optional[str]]
+    decided_at: Mapped[Optional[datetime]]
+    run_id: Mapped[Optional[str]]
+    expires_at: Mapped[datetime]
     created_at: Mapped[datetime]
 
 

@@ -38,6 +38,7 @@ from neutrino_database.models.enums import (
     DashboardWidgetTypeEnum,
     EstateScopeKindEnum,
     ExcelDatasetStatus,
+    ExecutionProposalStatusEnum,
     FileProcessingStatusEnum,
     FileSourceTypeEnum,
     IdpProviderEnum,
@@ -4251,4 +4252,64 @@ workflow_trigger = Table(
         unique=True,
         postgresql_where=text("token_hash IS NOT NULL"),
     ),
+)
+
+
+# ---------------------------------------------------------------------------
+# execution_proposal — an agent-proposed execution awaiting a human decision
+# (ITOps merge S4, §4.1).
+#
+# The proposal is the unit of approval: it freezes the exact graph, the resolved
+# inputs and the targets, and the decision binds to their digest. A changed
+# procedure or target is a NEW proposal, never a re-decision of this one.
+# Credentials never land here; connector binding IDs do.
+# ---------------------------------------------------------------------------
+
+execution_proposal = Table(
+    "execution_proposal",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+
+    # NULL for a one-off the agent composed; set when it came from a revision.
+    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="SET NULL"), nullable=True),
+    Column("revision_id", UUID(as_uuid=False), ForeignKey("workflow_revision.id", ondelete="SET NULL"), nullable=True),
+
+    # The conversation that proposed it, so chat and the inbox show one item.
+    Column("chat_id", UUID(as_uuid=False), ForeignKey("chat.id", ondelete="SET NULL"), nullable=True),
+
+    Column("graph", JSONB, nullable=False),
+    Column("inputs", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+
+    # Human-readable preview of every side-effecting branch, for the card.
+    Column("preview", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+
+    # sha256 over the canonical graph + inputs. The decision binds to this.
+    Column("digest", Text, nullable=False),
+
+    Column(
+        "status",
+        PgEnum(
+            ExecutionProposalStatusEnum,
+            name="execution_proposal_status",
+            values_callable=lambda enum: [e.value for e in enum],
+        ),
+        nullable=False,
+        server_default=text("'pending'"),
+    ),
+
+    Column("requested_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("decided_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("decided_at", TIMESTAMP(timezone=True), nullable=True),
+
+    # The run the approval started, once one exists. NULL while pending.
+    Column("run_id", UUID(as_uuid=False), ForeignKey("workflow_run.id", ondelete="SET NULL"), nullable=True),
+
+    Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    # The approval inbox path: pending proposals in this workspace.
+    Index("ix_execution_proposal_pending", "workspace_id", "status"),
 )

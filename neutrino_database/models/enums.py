@@ -895,3 +895,21 @@ class WorkflowTriggerStatusEnum(str, Enum):
     """
     ACTIVE = "active"
     DISABLED = "disabled"
+
+
+class ExecutionProposalStatusEnum(str, Enum):
+    """Where an agent-proposed execution stands (ITOps merge S4, §4.1).
+
+    pending   — recorded, awaiting a human decision. Nothing has run.
+    approved  — a human approved this exact digest; the run may start.
+    rejected  — a human refused it. It never becomes approvable again.
+    cancelled — withdrawn before anyone decided (the requester, or a superseding
+                proposal). Distinct from ``rejected``: nobody said no.
+    expired   — ``expires_at`` passed with no decision. A timeout must never
+                read as an approval, so this is its own terminal value.
+    """
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
