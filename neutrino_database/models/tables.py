@@ -3985,6 +3985,15 @@ workflow = Table(
         server_default=text("'draft'"),
     ),
 
+    # The revision chat discovery and triggers resolve. NULL until first publish.
+    # SET NULL rather than CASCADE: losing a revision must not delete the workflow.
+    Column(
+        "published_revision_id",
+        UUID(as_uuid=False),
+        ForeignKey("workflow_revision.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+
     Column(
         "created_by",
         UUID(as_uuid=False),
@@ -3996,6 +4005,38 @@ workflow = Table(
 
     # "Workflows in workspace W of tenant T" — the builder list path.
     Index("ix_workflow_tenant_workspace", "tenant_id", "workspace_id"),
+)
+
+
+# ---------------------------------------------------------------------------
+# workflow_revision — an immutable published revision (ITOps merge §5).
+#
+# Publication freezes the draft's graph and its input contract here and points
+# workflow.published_revision_id at the row; editing the draft never touches a
+# revision. Runs record which revision they used, so history stays readable
+# after a republish.
+# ---------------------------------------------------------------------------
+
+workflow_revision = Table(
+    "workflow_revision",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("revision_number", Integer, nullable=False),
+    Column("graph", JSONB, nullable=False),
+
+    # The published input contract: which values are fixed and which the
+    # caller supplies, with defaults. S2's configurable targets and parameters.
+    Column("input_schema", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    UniqueConstraint("workflow_id", "revision_number", name="uq_workflow_revision_number"),
+    Index("ix_workflow_revision_workflow", "workflow_id"),
 )
 
 
@@ -4019,7 +4060,9 @@ workflow_run = Table(
     # don't need a join. Both cascade with their parent.
     Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
     Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
-    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
+    # Nullable: a one-off run (spec S1) carries no library workflow behind it,
+    # only its own graph_snapshot below.
+    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=True),
 
     # workflow_version_id stays a bare UUID until M6 adds workflow_version.
     Column("workflow_version_id", UUID(as_uuid=False), nullable=True),
@@ -4061,6 +4104,11 @@ workflow_run = Table(
     Column("temporal_run_id", Text, nullable=True),
     Column("trigger_payload", JSONB, nullable=True),
     Column("error_message", Text, nullable=True),
+
+    # The frozen graph this run actually executed. Required for a one-off run
+    # (no library workflow behind it) and kept for every run so history survives
+    # a draft edit or a republish. S1.
+    Column("graph_snapshot", JSONB, nullable=True),
 
     # created = when triggered; started = when execution began; finished = end.
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),

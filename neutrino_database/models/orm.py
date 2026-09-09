@@ -1639,9 +1639,32 @@ class Workflow(Base):
     description: Mapped[Optional[str]]
     graph: Mapped[dict]
     status: Mapped[WorkflowStatusEnum]
+    published_revision_id: Mapped[Optional[str]]
     created_by: Mapped[Optional[str]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
+
+
+class WorkflowRevision(Base):
+    """An immutable published revision of a workflow (ITOps merge §5).
+
+    Publication freezes the draft's ``graph`` and its ``input_schema`` here and
+    points ``workflow.published_revision_id`` at the row; editing the draft
+    never touches a revision. Runs record which revision they used, so history
+    stays readable after a republish.
+    """
+
+    __table__ = tables.workflow_revision
+
+    id: Mapped[str]
+    workflow_id: Mapped[str]
+    tenant_id: Mapped[str]
+    workspace_id: Mapped[str]
+    revision_number: Mapped[int]
+    graph: Mapped[dict]
+    input_schema: Mapped[dict]
+    created_by: Mapped[Optional[str]]
+    created_at: Mapped[datetime]
 
 
 class WorkflowRun(Base):
@@ -1653,6 +1676,10 @@ class WorkflowRun(Base):
     ``finished_at``. ``workflow_version_id`` / ``trigger_id`` are unconstrained
     UUIDs until M6 / M4 add their tables. Temporal owns the step-by-step event
     history; this row + ``WorkflowRunStep`` are the queryable, auditable record.
+
+    ``workflow_id`` is nullable: a one-off run (spec S1) has no library
+    workflow behind it and instead carries its own ``graph_snapshot``, which
+    every run keeps regardless so history survives a draft edit or republish.
     """
 
     __table__ = tables.workflow_run
@@ -1660,7 +1687,7 @@ class WorkflowRun(Base):
     id: Mapped[str]
     tenant_id: Mapped[str]
     workspace_id: Mapped[str]
-    workflow_id: Mapped[str]
+    workflow_id: Mapped[Optional[str]]
     workflow_version_id: Mapped[Optional[str]]
     trigger_id: Mapped[Optional[str]]
     status: Mapped[WorkflowRunStatusEnum]
@@ -1670,6 +1697,7 @@ class WorkflowRun(Base):
     temporal_run_id: Mapped[Optional[str]]
     trigger_payload: Mapped[Optional[dict]]
     error_message: Mapped[Optional[str]]
+    graph_snapshot: Mapped[Optional[dict]]
     created_at: Mapped[datetime]
     started_at: Mapped[Optional[datetime]]
     finished_at: Mapped[Optional[datetime]]
