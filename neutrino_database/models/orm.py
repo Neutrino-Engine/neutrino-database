@@ -18,6 +18,7 @@ from neutrino_database.models.enums import (
     DashboardStatusEnum,
     DashboardVisibilityEnum,
     DashboardWidgetTypeEnum,
+    EstateScopeKindEnum,
     ExcelDatasetStatus,
     IdpProviderEnum,
     IntegrationAuthKindEnum,
@@ -483,6 +484,11 @@ class Chat(Base):
     # TD-DA-PILLAR-PERSIST — pillar this chat was initiated on. NULL for
     # Unified (AUTO, spans all pillars) and legacy pre-column rows.
     pillar: Mapped[Optional[PillarEnum]]
+    # ITOps merge S5 — the estate resource this conversation is about. NULL
+    # for every non-estate chat. estate_uid is not a FK: it lives in Neo4j.
+    estate_scope_kind: Mapped[Optional[EstateScopeKindEnum]]
+    estate_uid: Mapped[Optional[str]]
+    estate_display_name: Mapped[Optional[str]]
     # DA data scope (only set when pillar == DATA_ANALYTICS). Mirrors the
     # FE text_to_sql_config so a reopened DA chat restores its schema.
     # NC-474 — ``da_connection_id`` is the authoritative pin; the name is kept

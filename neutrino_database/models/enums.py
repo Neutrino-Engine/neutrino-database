@@ -576,6 +576,18 @@ class ChatKindEnum(str, Enum):
     WORKFLOW_BUILD = "workflow_build"
 
 
+class EstateScopeKindEnum(str, Enum):
+    """What estate resource a conversation is about (ITOps merge S5).
+
+    A chat with a scope is still an ordinary ad_hoc conversation: the scope is a
+    visible chip and a server-side resolution hint, never a permission and never
+    hidden text prepended to the user's message. Several conversations may share
+    one uid.
+    """
+    HOST = "host"
+    INCIDENT = "incident"
+
+
 class DAAccessResourceTypeEnum(str, Enum):
     """Which DA catalog level a workspace_da_access_grant row applies
     to (X-DA-ACL-1). The grant + the resource_id together identify the

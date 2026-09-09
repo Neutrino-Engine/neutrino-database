@@ -36,6 +36,7 @@ from neutrino_database.models.enums import (
     DashboardStatusEnum,
     DashboardVisibilityEnum,
     DashboardWidgetTypeEnum,
+    EstateScopeKindEnum,
     ExcelDatasetStatus,
     FileProcessingStatusEnum,
     FileSourceTypeEnum,
@@ -778,6 +779,22 @@ chat = Table(
         PgEnum(PillarEnum, name="pillar", create_type=False),
         nullable=True,
     ),
+    # ITOps merge S5 — the estate resource this conversation is about. Mirrors
+    # the dashboard_id / workflow_id / pillar precedent above: scope belongs to
+    # the row, not to localStorage, so the chip survives a refresh and a reopen
+    # from history. NULL for every non-estate chat. Not a foreign key: an estate
+    # uid lives in Neo4j, so there is nothing here to reference.
+    Column(
+        "estate_scope_kind",
+        PgEnum(
+            EstateScopeKindEnum,
+            name="estate_scope_kind",
+            values_callable=lambda enum: [e.value for e in enum],
+        ),
+        nullable=True,
+    ),
+    Column("estate_uid", Text, nullable=True),
+    Column("estate_display_name", Text, nullable=True),
     # DA data scope captured at chat creation (only set when pillar =
     # DATA_ANALYTICS). Mirrors the FE ``text_to_sql_config`` so a reopened DA
     # chat auto-selects its schema and runs against the same connection
