@@ -907,9 +907,14 @@ class ExecutionProposalStatusEnum(str, Enum):
                 proposal). Distinct from ``rejected``: nobody said no.
     expired   — ``expires_at`` passed with no decision. A timeout must never
                 read as an approval, so this is its own terminal value.
+    succeeded — the approved run finished and its postcheck passed.
+    failed    — the approved run finished and its postcheck failed, or the run
+                itself failed. Terminal; the requester proposes again.
     """
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"

@@ -27,8 +27,17 @@ def test_a_one_off_proposal_needs_no_library_workflow_or_chat():
 
 def test_a_timeout_is_not_an_approval():
     values = {e.value for e in ExecutionProposalStatusEnum}
-    assert values == {"pending", "approved", "rejected", "cancelled", "expired"}
+    assert values == {
+        "pending", "approved", "rejected", "cancelled", "expired", "succeeded", "failed",
+    }
     assert execution_proposal.columns["status"].nullable is False
+
+
+def test_one_open_proposal_per_digest():
+    index = {i.name: i for i in execution_proposal.indexes}["uq_execution_proposal_open_digest"]
+    assert index.unique is True
+    assert [c.name for c in index.columns] == ["workspace_id", "digest"]
+    assert "pending" in str(index.dialect_options["postgresql"]["where"])
 
 
 def test_the_inbox_reads_pending_proposals_by_workspace():

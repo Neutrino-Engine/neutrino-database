@@ -4312,4 +4312,13 @@ execution_proposal = Table(
 
     # The approval inbox path: pending proposals in this workspace.
     Index("ix_execution_proposal_pending", "workspace_id", "status"),
+    # One live proposal per procedure: the same graph and inputs in a workspace
+    # attach to the open card instead of adding a second one (plan §16 dedup).
+    Index(
+        "uq_execution_proposal_open_digest",
+        "workspace_id",
+        "digest",
+        unique=True,
+        postgresql_where=text("status IN ('pending', 'approved')"),
+    ),
 )
