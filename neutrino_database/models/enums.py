@@ -576,6 +576,18 @@ class ChatKindEnum(str, Enum):
     WORKFLOW_BUILD = "workflow_build"
 
 
+class EstateScopeKindEnum(str, Enum):
+    """What estate resource a conversation is about (ITOps merge S5).
+
+    A chat with a scope is still an ordinary ad_hoc conversation: the scope is a
+    visible chip and a server-side resolution hint, never a permission and never
+    hidden text prepended to the user's message. Several conversations may share
+    one uid.
+    """
+    HOST = "host"
+    INCIDENT = "incident"
+
+
 class DAAccessResourceTypeEnum(str, Enum):
     """Which DA catalog level a workspace_da_access_grant row applies
     to (X-DA-ACL-1). The grant + the resource_id together identify the
@@ -883,3 +895,26 @@ class WorkflowTriggerStatusEnum(str, Enum):
     """
     ACTIVE = "active"
     DISABLED = "disabled"
+
+
+class ExecutionProposalStatusEnum(str, Enum):
+    """Where an agent-proposed execution stands (ITOps merge S4, §4.1).
+
+    pending   — recorded, awaiting a human decision. Nothing has run.
+    approved  — a human approved this exact digest; the run may start.
+    rejected  — a human refused it. It never becomes approvable again.
+    cancelled — withdrawn before anyone decided (the requester, or a superseding
+                proposal). Distinct from ``rejected``: nobody said no.
+    expired   — ``expires_at`` passed with no decision. A timeout must never
+                read as an approval, so this is its own terminal value.
+    succeeded — the approved run finished and its postcheck passed.
+    failed    — the approved run finished and its postcheck failed, or the run
+                itself failed. Terminal; the requester proposes again.
+    """
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
