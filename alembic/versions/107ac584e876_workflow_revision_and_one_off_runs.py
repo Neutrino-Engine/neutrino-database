@@ -80,12 +80,6 @@ def upgrade() -> None:
         nullable=True,
     )
     op.add_column("workflow_run", sa.Column("graph_snapshot", JSONB(), nullable=True))
-    # A run must have a graph to execute: either its library workflow or its own snapshot.
-    op.create_check_constraint(
-        "ck_workflow_run_has_graph",
-        "workflow_run",
-        "workflow_id IS NOT NULL OR graph_snapshot IS NOT NULL",
-    )
 
 
 def downgrade() -> None:
@@ -94,7 +88,6 @@ def downgrade() -> None:
     A one-off run has no workflow_id, so it cannot survive the NOT NULL below.
     Its steps cascade with it.
     """
-    op.drop_constraint("ck_workflow_run_has_graph", "workflow_run", type_="check")
     op.execute("DELETE FROM workflow_run WHERE workflow_id IS NULL")
     op.drop_column("workflow_run", "graph_snapshot")
     op.alter_column(
