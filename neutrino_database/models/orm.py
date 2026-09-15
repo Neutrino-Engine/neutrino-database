@@ -1663,7 +1663,7 @@ class WorkflowRevision(Base):
     workspace_id: Mapped[str]
     revision_number: Mapped[int]
     graph: Mapped[dict]
-    input_schema: Mapped[dict]
+    input_schema: Mapped[list]
     created_by: Mapped[Optional[str]]
     created_at: Mapped[datetime]
 

@@ -8,8 +8,10 @@ graph and inputs attaches to the open card.
 
 ``ALTER TYPE ... ADD VALUE`` cannot run inside a transaction on PostgreSQL below
 12 and cannot be rolled back on any version, so the downgrade drops only the
-index. Existing duplicates are collapsed first: the newest row of each open
-digest is kept and the rest are marked ``cancelled`` (nobody said no).
+index. Existing duplicates are collapsed first: an approved row wins over any
+pending one, then the newest row of each open digest is kept, and the rest are
+marked ``cancelled`` (nobody said no). Approved first, because an approved row
+may already have a run behind it and c5d6e7f8a9b0 closes it from that run.
 
 Revision ID: b4c5d6e7f8a9
 Revises: 3a7b9c1d2e4f
@@ -40,7 +42,8 @@ def upgrade() -> None:
             WHERE q.workspace_id = p.workspace_id
               AND q.digest = p.digest
               AND q.status IN ('pending', 'approved')
-              AND (q.created_at, q.id) > (p.created_at, p.id)
+              AND ((q.status = 'approved'), q.created_at, q.id)
+                  > ((p.status = 'approved'), p.created_at, p.id)
           )
         """
     )

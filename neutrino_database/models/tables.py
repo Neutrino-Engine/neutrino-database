@@ -4116,6 +4116,9 @@ workflow_run = Table(
     Column("started_at", TIMESTAMP(timezone=True), nullable=True),
     Column("finished_at", TIMESTAMP(timezone=True), nullable=True),
 
+    # A run must have a graph to execute: its library workflow or its own snapshot.
+    CheckConstraint("workflow_id IS NOT NULL OR graph_snapshot IS NOT NULL", name="ck_workflow_run_has_graph"),
+
     # Run-history list path: runs of a workflow, newest first.
     Index("ix_workflow_run_workflow_created", "workflow_id", "created_at"),
     # Tenant/workspace governance roll-up.
