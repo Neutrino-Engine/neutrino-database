@@ -40,7 +40,7 @@ def upgrade() -> None:
             WHERE q.workspace_id = p.workspace_id
               AND q.digest = p.digest
               AND q.status IN ('pending', 'approved')
-              AND q.created_at > p.created_at
+              AND (q.created_at, q.id) > (p.created_at, p.id)
           )
         """
     )
