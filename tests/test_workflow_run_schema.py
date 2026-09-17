@@ -7,11 +7,13 @@ triggered it, when, how long it took end-to-end, and — per node — its input,
 output, status, attempt count, and time taken.
 
 Locked semantics (see product-feature-roadmap/workflow-execution/implementation.md §2):
-  * ``workflow_run`` is workspace+tenant-scoped (both NOT NULL, cascade) and
-    references its ``workflow`` (cascade). ``workflow_version_id`` /
-    ``trigger_id`` are plain nullable UUIDs for now — no FK, because the
-    version/trigger tables land in M6/M4; the columns exist so those slices add
-    only the constraint, not a column.
+  * ``workflow_run`` is workspace+tenant-scoped (both NOT NULL, cascade).
+    ``workflow_id`` (cascade) is nullable: ITOps merge S1 lets a one-off run
+    exist with no library workflow behind it, carrying its own
+    ``graph_snapshot`` instead (see test_workflow_revision_schema.py).
+    ``workflow_version_id`` / ``trigger_id`` are plain nullable UUIDs for now
+    — no FK, because the version/trigger tables land in M6/M4; the columns
+    exist so those slices add only the constraint, not a column.
   * ``actor_user_id`` is who triggered THIS run — nullable + SET NULL (cron /
     anonymous webhook have no actor). ``audit_principal_user_id`` is always set
     (author for cron, actor otherwise) and is RESTRICT, not SET NULL: the audit
@@ -114,7 +116,6 @@ class TestWorkflowRunColumns:
         cols = await _columns(test_engine, "workflow_run")
         assert cols["tenant_id"]["nullable"] is False
         assert cols["workspace_id"]["nullable"] is False
-        assert cols["workflow_id"]["nullable"] is False
         assert cols["actor_kind"]["nullable"] is False
         # The audit principal is always known — never nulled.
         assert cols["audit_principal_user_id"]["nullable"] is False
@@ -131,6 +132,9 @@ class TestWorkflowRunColumns:
         # Version / trigger FKs land in M6 / M4 — columns nullable for now.
         assert cols["workflow_version_id"]["nullable"] is True
         assert cols["trigger_id"]["nullable"] is True
+        # ITOps merge S1: a one-off run needs no library workflow behind it —
+        # it carries its own graph_snapshot instead. No longer required.
+        assert cols["workflow_id"]["nullable"] is True
 
     @pytest.mark.asyncio
     async def test_created_at_not_null(self, test_engine):
