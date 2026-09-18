@@ -1,4 +1,5 @@
 from sqlalchemy import (
+    Date, BigInteger,
     Table, Column, Integer, SmallInteger, String, Text, TIMESTAMP, DateTime, Index, Float, ForeignKey, BigInteger, Enum as PgEnum,
     UniqueConstraint, Numeric, DDL, event, CheckConstraint
 )
@@ -1333,6 +1334,37 @@ workspace = Table(
         nullable=False,
         server_default=text("true"),
     ),
+    # the workspace's monthly LLM ceiling in USD, and the default
+    # ceiling for one member inside it. NULL means "use the platform default"
+    # (``settings.workspace_monthly_usd_cap``), which is what every existing
+    # workspace gets on upgrade: a cap nobody set is not a cap of zero.
+    # Stored on the workspace rather than in a settings table because there
+    # are exactly two numbers and they are read on the path of every LLM call.
+    Column("monthly_llm_usd_cap", Numeric(10, 2), nullable=True),
+    Column("monthly_llm_usd_cap_per_user", Numeric(10, 2), nullable=True),
+    # The pacing ceiling: what one member may spend in one UTC day. NULL
+    # derives it from the monthly figure (see app.services.llm_spend.derive),
+    # so a workspace that sets nothing still cannot lose its month in a
+    # morning.
+    Column("daily_llm_usd_cap_per_user", Numeric(10, 2), nullable=True),
+    # Share of the monthly cap held back for work no member asked for:
+    # enrichment, scheduled workflows, chat titles. Percent, 0-100. NULL is
+    # the platform default. Without a reserve the member allowances would sum
+    # to the whole cap and background work would be spending money that was
+    # already promised to people.
+    Column("llm_background_reserve_pct", Numeric(5, 2), nullable=True),
+    # Task key -> provider id, the admin's model routing. A task absent here
+    # falls back to the platform's own default for that task, then to the
+    # workspace's active provider. JSONB rather than a table because it is a
+    # handful of keys read alongside the provider config that is being
+    # fetched anyway, and a row per key would mean a repository, a migration
+    # per new task, and a join on the hottest path in the product.
+    Column(
+        "llm_task_lanes",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
     Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
@@ -1391,11 +1423,79 @@ workspace_member = Table(
     # per-user so a member removed and re-added gets a fresh welcome.
     Column("first_visited_at", TIMESTAMP(timezone=True), nullable=True),
 
+    # this member's own monthly LLM ceiling in USD, raised by an
+    # admin for someone the workspace default does not fit. NULL means the
+    # workspace default applies, so the column is empty for almost everyone
+    # and a grant reads as the exception it is.
+    Column("monthly_llm_usd_cap", Numeric(10, 2), nullable=True),
+    Column("daily_llm_usd_cap", Numeric(10, 2), nullable=True),
+
     UniqueConstraint("workspace_id", "user_id", name="ux_workspace_member_workspace_user"),
     Index("ix_workspace_member_workspace", "workspace_id"),
     Index("ix_workspace_member_user", "user_id"),
     Index("ix_workspace_member_workspace_admin", "workspace_id", "is_workspace_admin"),
 )
+
+# what one workspace spent on LLM calls, per member, per month.
+#
+# ONE table answers both questions the product asks. A member's spend is one
+# row. The workspace's spend is the sum of its rows for that month, which is a
+# few hundred rows at 500 members and is read behind a short Redis cache. A
+# second workspace-level table would be a denormalisation that can disagree
+# with the rows it summarises, and the disagreement would stay invisible until
+# somebody was refused a turn they had not spent.
+#
+# ``user_id`` is NULL for work no person asked for: an enrichment run, a
+# scheduled workflow, a chat title written after the user closed the tab.
+# That cost is real and has to land somewhere visible rather than be dropped
+# because there is nobody to attribute it to.
+#
+# Postgres is the ledger and not Redis, because the cap is the only thing
+# between a runaway loop and the bill, and a cache flush must not reset it.
+# The read is cached; the write never is.
+workspace_llm_spend = Table(
+    "workspace_llm_spend",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    # SET NULL rather than CASCADE: a member who leaves does not erase what
+    # the workspace spent. Their rows survive as unattributed cost.
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    # First day of the calendar month, UTC. A date rather than a month/year
+    # pair, so range queries are ordinary date comparisons.
+    Column("period", Date, nullable=False),
+
+    Column("prompt_tokens", BigInteger, nullable=False, server_default=text("0")),
+    Column("completion_tokens", BigInteger, nullable=False, server_default=text("0")),
+    Column("cached_tokens", BigInteger, nullable=False, server_default=text("0")),
+    Column("llm_calls", BigInteger, nullable=False, server_default=text("0")),
+    # Numeric, never float: this accumulates millions of small additions, and
+    # a float would drift away from the invoice it exists to predict.
+    Column("cost_usd", Numeric(14, 6), nullable=False, server_default=text("0")),
+
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+
+    # The UPSERT target. NULLS NOT DISTINCT so the unattributed row (user_id
+    # IS NULL) stays ONE row per workspace-month: under the default semantics
+    # every NULL is distinct, the conflict clause would never fire, and
+    # background work would insert a fresh row per LLM call.
+    Index(
+        "ux_workspace_llm_spend_period",
+        "workspace_id",
+        "user_id",
+        "period",
+        unique=True,
+        postgresql_nulls_not_distinct=True,
+    ),
+    # The workspace total for a month, and the admin table's ordering.
+    Index("ix_workspace_llm_spend_workspace_period", "workspace_id", "period"),
+    # One member's own usage page, across workspaces.
+    Index("ix_workspace_llm_spend_user_period", "user_id", "period"),
+)
+
 
 workspace_access_request = Table(
     "workspace_access_request",
