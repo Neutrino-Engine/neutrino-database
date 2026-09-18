@@ -35,7 +35,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from neutrino_database.models.enums import (
     DAConnectionStatusEnum,
@@ -45,10 +45,12 @@ from neutrino_database.models.enums import (
     DAJoinTypeEnum,
     DAMetricSourceEnum,
     DASourceTypeEnum,
+    DATA_BINDING_FORMS,
     DATableTypeEnum,
     DashboardStatusEnum,
     DashboardVisibilityEnum,
     DashboardWidgetTypeEnum,
+    DataBindingKindEnum,
 )
 
 
@@ -450,17 +452,130 @@ class DashboardWidgetPosition(_DABase):
 
 
 class DashboardWidgetDataBinding(_DABase):
-    """How a widget gets its data — inline SQL (Q2 locked in DA-P3
-    design). `query_ref_id` is reserved for the future saved-query
-    indirection (TD-DASH-SAVED-QUERIES-1); when set, ``sql`` is
-    derived from it instead of stored verbatim.
+    """How a widget gets its data — one query, in whichever language its
+    connection speaks.
+
+    A widget is a QUERY, not a snapshot: it re-executes on every dashboard
+    load. Originally that query could only be SQL, which quietly made a
+    dashboard a relational-only surface — a chart over a Mongo collection could
+    be produced in chat but never kept, purely because of where its data lived.
+    That distinction is invisible in the question the user asked, so it does not
+    decide whether the answer can be saved.
+
+    ``kind`` names the form; ``DATA_BINDING_FORMS`` in models.enums says what
+    each form requires and which connector-service route executes it. Adding a
+    datasource — Iceberg, Trino, whatever — is a member on
+    ``DataBindingKindEnum`` plus a row in that table: this model needs no new
+    branch, and every consumer that dispatches on ``kind`` keeps working. The
+    tag exists precisely so no reader has to guess a binding's type from which
+    fields happen to be set, which is the thing that would have to be re-taught
+    in N places per new source.
+
+    Read-only enforcement and schema scope live downstream at
+    connector-service for every route in the table, so no form is more
+    privileged than another.
+
+    ``query_ref_id`` is reserved for the future saved-query indirection
+    (TD-DASH-SAVED-QUERIES-1); when set, the query is derived from it instead
+    of stored verbatim.
     """
     connection_id: UUID
-    schema_name: str
-    sql: str
+
+    # Absent on widgets written before the tag existed; inferred below.
+    kind: Optional[DataBindingKindEnum] = None
+
+    # ── relational form ──────────────────────────────────────────────
+    schema_name: Optional[str] = None
+    sql: Optional[str] = None
+
+    # ── document form ────────────────────────────────────────────────
+    database: Optional[str] = None
+    collection: Optional[str] = None
+    # A list of aggregation stages. Stored verbatim and forwarded opaquely;
+    # connector-service's mongo_guard rejects a write stage, exactly as it does
+    # for a pipeline sent from chat.
+    pipeline: Optional[list[dict]] = None
+
     # Optional bind params for parameterised widgets (e.g. filter UI).
     params: Optional[dict] = None
     query_ref_id: Optional[UUID] = None
+
+    @property
+    def execute_route(self) -> str:
+        """The connector-service route suffix that runs this binding.
+
+        One lookup, shared by the authed widget fetch and the anonymous
+        share-link executor, so they cannot drift on which endpoint runs which
+        binding.
+        """
+        return str(DATA_BINDING_FORMS[self.resolved_kind]["execute_route"])
+
+    @property
+    def execute_body(self) -> dict:
+        """The request body for ``execute_route``.
+
+        Built from ``body_fields`` rather than by a per-kind branch, so a new
+        datasource is still one table row. Not the same as the required fields:
+        a relational binding needs ``schema_name`` to be valid, but the execute
+        route does not take it.
+        """
+        fields = DATA_BINDING_FORMS[self.resolved_kind]["body_fields"]
+        return {f: getattr(self, f) for f in fields}  # type: ignore[union-attr]
+
+    @property
+    def resolved_kind(self) -> DataBindingKindEnum:
+        """``kind``, or the inferred kind for a legacy binding."""
+        return self.kind or DataBindingKindEnum.RELATIONAL
+
+    @model_validator(mode="after")
+    def _complete_for_its_kind(self) -> "DashboardWidgetDataBinding":
+        """Tag the binding if untagged, then check the fields its kind needs.
+
+        Inference is for stored rows only: every binding written before the tag
+        existed is relational, because that was the only form there was. New
+        writers pass ``kind`` explicitly.
+
+        A binding carrying more than one form's query is rejected rather than
+        resolved by precedence — the forms select different executors, so such a
+        binding is a widget whose behaviour depends on which check runs first.
+        Unconstructible is cheaper than deterministic.
+        """
+        present = {
+            k
+            for k, spec in DATA_BINDING_FORMS.items()
+            if any(
+                getattr(self, f, None) is not None
+                for f in spec["required"]  # type: ignore[union-attr]
+            )
+        }
+        if len(present) > 1:
+            named = ", ".join(sorted(k.value for k in present))
+            raise ValueError(
+                f"data_binding carries more than one query form ({named}); "
+                "a widget runs one query"
+            )
+
+        if self.kind is None:
+            if not present:
+                raise ValueError(
+                    "data_binding has no query; expected one of: "
+                    + ", ".join(
+                        f"{k.value} ({', '.join(s['required'])})"  # type: ignore[arg-type]
+                        for k, s in DATA_BINDING_FORMS.items()
+                    )
+                )
+            object.__setattr__(self, "kind", next(iter(present)))
+
+        missing = [
+            f
+            for f in DATA_BINDING_FORMS[self.kind]["required"]  # type: ignore[index,union-attr]
+            if getattr(self, f, None) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"a {self.kind.value} binding requires " + ", ".join(missing)
+            )
+        return self
 
 
 class DashboardWidgetVizSpec(_DABase):
@@ -517,6 +632,7 @@ class Dashboard(_DABase):
     description: Optional[str] = None
     status: DashboardStatusEnum
     visibility: DashboardVisibilityEnum
+    pinned: bool = False
     # The build chat that authored this dashboard (1:1). May be NULL
     # if the chat row was compliance-purged independently.
     build_chat_id: Optional[UUID] = None

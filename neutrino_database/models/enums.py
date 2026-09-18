@@ -192,6 +192,12 @@ class ServiceType(str, Enum):
     AZURE_OPENAI = "azure_openai"
     LANDINGAI = "landingai"
     BEDROCK = "bedrock"
+    # NC-526 — OpenRouter is an OpenAI-compatible aggregator, but it gets its
+    # own service type rather than riding "openai": its model ids are
+    # namespaced ("vendor/model"), its catalog is fetched at runtime, and it
+    # needs per-model reasoning-budget control that the OpenAI preset has no
+    # field for.
+    OPENROUTER = "openrouter"
 
 
 class ProviderCategory(str, Enum):
@@ -458,6 +464,61 @@ class DashboardVisibilityEnum(str, Enum):
     LINK_ONLY = "link_only"
 
 
+class DataBindingKindEnum(str, Enum):
+    """Which query language a dashboard widget's data_binding speaks.
+
+    A widget re-executes its query on every dashboard load, so the binding has
+    to say what kind of query it holds. This is an EXPLICIT tag rather than
+    something each consumer infers from which fields are populated, because
+    inference does not scale: every new datasource would mean editing every
+    reader (the FE's execute call, the public share executor, the pin mapper),
+    and a reader that had not been taught the new shape would silently treat it
+    as one of the old ones.
+
+    With a tag, adding a datasource is: one member here, one row in
+    ``DATA_BINDING_FORMS``, and the DA tool that produces it. Readers dispatch
+    on the tag and need no change.
+
+    relational — SQL over a warehouse / relational database.
+    document   — an aggregation pipeline over a collection (MongoDB).
+
+    Absent on widgets written before this tag existed; those are all relational,
+    and DashboardWidgetDataBinding infers that for them.
+    """
+    RELATIONAL = "relational"
+    DOCUMENT = "document"
+
+
+# Per-kind contract: the fields that must be present, and the connector-service
+# route that executes it. THE table to extend for a new datasource — an Iceberg
+# or Trino binding is a member above plus a row here, and every consumer that
+# dispatches on the tag keeps working untouched.
+#
+# ``execute_route`` is the suffix under
+# ``/api/v1/da/connections/{connection_id}/`` — shared so the authed widget
+# fetch, the anonymous share-link executor and any future caller cannot drift
+# apart on which endpoint runs which binding.
+#
+# ``body_fields`` are the binding fields that make up that route's request body.
+# Here rather than at each caller because the anonymous share-link executor
+# lives in the gateway and the authed fetch lives in the frontend — two repos
+# that would otherwise each hardcode a per-source body and drift. Note it is
+# NOT simply ``required``: a relational binding needs ``schema_name`` to be
+# valid but the execute route does not take it.
+DATA_BINDING_FORMS: dict[DataBindingKindEnum, dict[str, object]] = {
+    DataBindingKindEnum.RELATIONAL: {
+        "required": ("schema_name", "sql"),
+        "execute_route": "execute_query",
+        "body_fields": ("sql",),
+    },
+    DataBindingKindEnum.DOCUMENT: {
+        "required": ("database", "collection", "pipeline"),
+        "execute_route": "execute_pipeline",
+        "body_fields": ("database", "collection", "pipeline"),
+    },
+}
+
+
 class DashboardWidgetTypeEnum(str, Enum):
     """v1 widget catalog — what the canvas grid can render.
 
@@ -513,6 +574,18 @@ class ChatKindEnum(str, Enum):
     AD_HOC = "ad_hoc"
     DASHBOARD_BUILD = "dashboard_build"
     WORKFLOW_BUILD = "workflow_build"
+
+
+class EstateScopeKindEnum(str, Enum):
+    """What estate resource a conversation is about (ITOps merge S5).
+
+    A chat with a scope is still an ordinary ad_hoc conversation: the scope is a
+    visible chip and a server-side resolution hint, never a permission and never
+    hidden text prepended to the user's message. Several conversations may share
+    one uid.
+    """
+    HOST = "host"
+    INCIDENT = "incident"
 
 
 class DAAccessResourceTypeEnum(str, Enum):
@@ -822,3 +895,26 @@ class WorkflowTriggerStatusEnum(str, Enum):
     """
     ACTIVE = "active"
     DISABLED = "disabled"
+
+
+class ExecutionProposalStatusEnum(str, Enum):
+    """Where an agent-proposed execution stands (ITOps merge S4, §4.1).
+
+    pending   — recorded, awaiting a human decision. Nothing has run.
+    approved  — a human approved this exact digest; the run may start.
+    rejected  — a human refused it. It never becomes approvable again.
+    cancelled — withdrawn before anyone decided (the requester, or a superseding
+                proposal). Distinct from ``rejected``: nobody said no.
+    expired   — ``expires_at`` passed with no decision. A timeout must never
+                read as an approval, so this is its own terminal value.
+    succeeded — the approved run finished and its postcheck passed.
+    failed    — the approved run finished and its postcheck failed, or the run
+                itself failed. Terminal; the requester proposes again.
+    """
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"

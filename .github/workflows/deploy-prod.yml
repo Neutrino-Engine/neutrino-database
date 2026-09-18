@@ -3,9 +3,12 @@ name: deploy-prod
 # neutrino-database is baked into every Python service image at build time, so a
 # merge here is a RELEASE TRAIN, not a single deploy:
 #   1. build the migration image from this commit
-#   2. run alembic upgrade head against the prod DB
+#   2. run the migrations against the prod DB
 #   3. fan out to every dependent service so they rebuild against THIS commit
 # Skipping step 3 would leave services running old models against a new schema.
+#
+# Step 2 runs whatever neutrino-k8s/jobs/migrate-job.yaml sets. It must be
+# `make migrate`; bare `alembic upgrade head` skips the backfill and the FGA model.
 
 on:
   push:
@@ -61,7 +64,7 @@ jobs:
           docker push "$ACR/$IMAGE:$TAG"
           docker push "$ACR/$IMAGE:release-cmd"
 
-      - name: Run alembic migration
+      - name: Run migrations (alembic + authz-store backfill + FGA model)
         run: |
           az aks get-credentials -g "$AKS_RG" -n "$AKS_NAME" --overwrite-existing
           kubectl delete job neutrino-db-migrate -n "$NAMESPACE" --ignore-not-found
