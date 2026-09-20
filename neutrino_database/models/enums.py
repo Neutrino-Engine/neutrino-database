@@ -25,6 +25,7 @@ class AllowedModuleEnum(str, Enum):
     WEB_SEARCH = "Web Search"
     DEEP_RESEARCH = "Deep Research"
     DASHBOARDS = "Dashboards"
+    AGENT_STUDIO = "Agent Studio"
 
 class UserStatusEnum(str, Enum):
     INVITED = "INVITED"
