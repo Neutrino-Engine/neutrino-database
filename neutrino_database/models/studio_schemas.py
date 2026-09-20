@@ -179,6 +179,9 @@ class TeamConfig(_Strict):
     input_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
     output_schema: dict[str, Any]
     runs_as: RunsAs = Field(default_factory=RunsAs)
+    # Mirrored into studio_team.sensitive by the repository so the executor,
+    # redaction and promotion paths can branch on a column (decision 29).
+    sensitive: bool = False
     approver_ids: list[UUID] = Field(default_factory=list)
     # wait — pause for a human; deny — unattended runs refuse the write instead.
     approval_policy: Literal["wait", "deny"] = "wait"
