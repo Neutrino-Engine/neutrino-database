@@ -4802,6 +4802,13 @@ studio_test_case = Table(
     Column("subject_id", UUID(as_uuid=False), nullable=False),
     Column("name", String(200), nullable=False),
     Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # A case is input + files + assertions: the case OWNS its files, so "Run
+    # all" runs each case with its own and nothing is attached by hand. Same
+    # inbound descriptors a run start takes (app/studio/inbound_files.py):
+    # [{"attachment_id": ...}] or [{"bucket", "key", "filename"}]. They land in
+    # the run workspace at files/<filename>, which is what an input field like
+    # document_path names.
+    Column("files", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     # [{path, op, expected}] evaluated against the output after schema validation.
     Column("assertions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("last_result", String(16), nullable=False, server_default=text("'never_run'")),

@@ -58,6 +58,7 @@ from neutrino_database.models.tables import (
     studio_run_event,
     studio_team,
     studio_team_version,
+    studio_test_case,
     studio_trigger_event,
     tenant,
     user as user_table,
@@ -226,6 +227,39 @@ async def test_run_event_seq_is_a_unique_cursor(test_engine):
             # events die with the run
             await conn.execute(delete(studio_run).where(studio_run.c.id == run_id))
             assert (await conn.execute(select(studio_run_event.c.id).where(studio_run_event.c.run_id == run_id))).first() is None
+    finally:
+        async with test_engine.begin() as conn:
+            await conn.execute(delete(tenant).where(tenant.c.id == tenant_id))
+
+
+@pytest.mark.asyncio
+async def test_a_test_case_carries_its_own_files(test_engine):
+    """A case is input + files + assertions — the case owns its files, so
+    "Run all" never needs a file attached by hand."""
+    async with test_engine.begin() as conn:
+        tenant_id, workspace_id, user_id = await _seed(conn)
+    try:
+        async with test_engine.begin() as conn:
+            _, team_id, _ = await _seed_team_run(conn, tenant_id, workspace_id, user_id)
+            bare, carrying = str(uuid.uuid4()), str(uuid.uuid4())
+            await conn.execute(insert(studio_test_case).values(
+                id=bare, tenant_id=tenant_id, subject_kind="team", subject_id=team_id,
+                name="no files", input={}, assertions=[],
+            ))
+            locator = {"bucket": "neutrino-studio", "key": "template-fixtures/tds_gate/tds_s355_pass.txt",
+                       "filename": "tds_s355_pass.txt"}
+            await conn.execute(insert(studio_test_case).values(
+                id=carrying, tenant_id=tenant_id, subject_kind="team", subject_id=team_id,
+                name="compliant plate", input={"document_path": "files/tds_s355_pass.txt"},
+                files=[locator], assertions=[],
+            ))
+            rows = dict((str(r[0]), r[1]) for r in (await conn.execute(
+                select(studio_test_case.c.id, studio_test_case.c.files)
+                .where(studio_test_case.c.subject_id == team_id)
+            )).fetchall())
+            # The default is an empty list, never NULL: every case has a files array.
+            assert rows[bare] == []
+            assert rows[carrying] == [locator]
     finally:
         async with test_engine.begin() as conn:
             await conn.execute(delete(tenant).where(tenant.c.id == tenant_id))
