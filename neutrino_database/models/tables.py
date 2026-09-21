@@ -4666,6 +4666,11 @@ studio_run = Table(
     # the cycle has to be a plain column. The event row is the one that owns
     # the relationship; this is a convenience pointer for the console.
     Column("trigger_event_id", UUID(as_uuid=False), nullable=True),
+    # The conversation a chat-triggered run belongs to, so the finished team
+    # output can land as a chat_artifact (which requires a chat_id) and the
+    # card can deep-link. NULL for API, schedule and event runs. SET NULL so a
+    # deleted chat does not destroy the run record.
+    Column("chat_id", UUID(as_uuid=False), ForeignKey("chat.id", ondelete="SET NULL"), nullable=True),
     Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("output", JSONB, nullable=True),
     # The orchestrator's current task DAG: [{alias, agent_version_id, brief,
@@ -4831,4 +4836,44 @@ studio_workspace_file = Table(
     UniqueConstraint("run_id", "path", name="uq_studio_workspace_file_path"),
     CheckConstraint("size_bytes >= 0", name="ck_studio_workspace_file_size"),
     CheckConstraint("NOT indexed OR promoted_artifact_id IS NOT NULL", name="ck_studio_workspace_file_indexed_promoted"),
+)
+
+
+# ---------------------------------------------------------------------------
+# studio_run_event — the durable event log a run is replayed from.
+#
+# NOT the legacy ``run_events``: that table's ``run_id`` is String(26) with an
+# FK to the pre-existing ``runs`` table, and a studio run id is a 36-char UUID.
+# Rather than widen a column every other pillar depends on, Agent Studio owns
+# its own log.
+#
+# ``seq`` is the resumable cursor: the SSE endpoint sends it as the event id,
+# a reconnecting client returns it as Last-Event-ID, and replay is
+# ``WHERE run_id = :r AND seq > :last ORDER BY seq``. It is assigned by the
+# writer, not a sequence object, so a batch of events written in one flush
+# keeps the order the agent produced them in.
+#
+# ``payload`` holds exactly what the model or the operator saw: already
+# spilled, already redacted for a sensitive team. The raw payload, when one is
+# kept, lives in the run workspace under ``raw/``, never here.
+# ---------------------------------------------------------------------------
+studio_run_event = Table(
+    "studio_run_event",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    Column("seq", BigInteger, nullable=False),
+    # Which agent task produced it; NULL for run-level events (status, plan).
+    Column("task_id", UUID(as_uuid=False), ForeignKey("studio_agent_task.id", ondelete="SET NULL"), nullable=True),
+    Column("agent_alias", String(100), nullable=True),
+    Column("type", String(48), nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    CheckConstraint("seq >= 0", name="ck_studio_run_event_seq"),
+    UniqueConstraint("run_id", "seq", name="uq_studio_run_event_seq"),
+    # The only read path: replay from a cursor, in order.
+    Index("ix_studio_run_event_run_seq", "run_id", "seq"),
 )

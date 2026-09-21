@@ -13,6 +13,10 @@ plans/AGENT-STUDIO-PLAN.md. Locked design points these tests pin:
     four fail-closed outcomes.
   * ``user_memory.scope='team'`` requires ``team_id``; the team FK CASCADEs.
   * ``chat_artifact.run_id`` is SET NULL: the artifact outlives the run.
+  * ``studio_run_event`` is Agent Studio's own log, not the legacy
+    ``run_events`` (whose ``run_id`` is String(26) against the old ``runs``
+    table). ``seq`` is the SSE cursor and is unique per run, so a reconnecting
+    console resumes exactly once from its Last-Event-ID.
   * The shared pydantic contracts refuse the failure modes the harness relies
     on never seeing: a completed Envelope without output, a schema_invalid
     Envelope without raw_text, a Plan with a cycle, a ToolResult that is both
@@ -51,6 +55,7 @@ from neutrino_database.models.tables import (
     studio_approval,
     studio_event_trigger,
     studio_run,
+    studio_run_event,
     studio_team,
     studio_team_version,
     studio_trigger_event,
@@ -64,7 +69,7 @@ STUDIO_TABLES = {
     "studio_agent", "studio_agent_version", "studio_team", "studio_team_version",
     "studio_api_key", "studio_event_trigger", "studio_schedule", "studio_run",
     "studio_agent_task", "studio_approval", "studio_trigger_event",
-    "studio_test_case", "studio_workspace_file",
+    "studio_test_case", "studio_workspace_file", "studio_run_event",
 }
 
 
@@ -184,6 +189,43 @@ async def test_team_memory_scope_and_artifact_run_link(test_engine):
             await conn.execute(delete(studio_run).where(studio_run.c.id == run_id2))
             row = (await conn.execute(select(chat_artifact.c.run_id).where(chat_artifact.c.id == art_id))).first()
             assert row is not None and row[0] is None
+    finally:
+        async with test_engine.begin() as conn:
+            await conn.execute(delete(tenant).where(tenant.c.id == tenant_id))
+
+
+@pytest.mark.asyncio
+async def test_run_event_seq_is_a_unique_cursor(test_engine):
+    async with test_engine.begin() as conn:
+        tenant_id, workspace_id, user_id = await _seed(conn)
+    try:
+        async with test_engine.begin() as conn:
+            agent_id, team_id, run_id = await _seed_team_run(conn, tenant_id, workspace_id, user_id)
+            for seq, kind in enumerate(("run_status", "plan_updated", "task_started")):
+                await conn.execute(insert(studio_run_event).values(
+                    id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id, seq=seq,
+                    type=kind, payload={"status": "planning"},
+                ))
+            with pytest.raises(IntegrityError):
+                async with conn.begin_nested():
+                    await conn.execute(insert(studio_run_event).values(
+                        id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id, seq=0, type="dup",
+                    ))
+            with pytest.raises(IntegrityError):
+                async with conn.begin_nested():
+                    await conn.execute(insert(studio_run_event).values(
+                        id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id, seq=-1, type="neg",
+                    ))
+            # replay from a cursor is the only read path
+            rows = (await conn.execute(
+                select(studio_run_event.c.seq)
+                .where(studio_run_event.c.run_id == run_id, studio_run_event.c.seq > 0)
+                .order_by(studio_run_event.c.seq)
+            )).fetchall()
+            assert [r[0] for r in rows] == [1, 2]
+            # events die with the run
+            await conn.execute(delete(studio_run).where(studio_run.c.id == run_id))
+            assert (await conn.execute(select(studio_run_event.c.id).where(studio_run_event.c.run_id == run_id))).first() is None
     finally:
         async with test_engine.begin() as conn:
             await conn.execute(delete(tenant).where(tenant.c.id == tenant_id))
