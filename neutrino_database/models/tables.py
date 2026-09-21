@@ -1329,7 +1329,9 @@ workspace = Table(
         "enabled_pillars",
         ARRAY(PgEnum(PillarEnum, name="pillar")),
         nullable=False,
-        server_default=text("'{}'::pillar[]"),
+        # Agent Studio is on by default (migration e1a5c9d3b7f4); the other
+        # three are still chosen in the onboarding wizard.
+        server_default=text("'{AGENT_STUDIO}'::pillar[]"),
     ),
     # NC-500 — presentation, NOT capability. `enabled_pillars` says what
     # the workspace can do; this says whether the chat page offers the
