@@ -58,6 +58,10 @@ class Limits(_Strict):
     stall_idle_s: int = Field(300, ge=30)
     stall_in_tool_s: int = Field(900, ge=30)
     stall_grace_s: int = Field(60, ge=0)
+    # A question stops the whole task until a person answers, so an agent that
+    # can ask freely can hold a run hostage. ``app/studio/harness.py`` reads
+    # this and falls back to its own constant of 3 when it is absent.
+    max_questions: int = Field(3, ge=0, le=20)
 
 
 class ConnectorAction(_Strict):

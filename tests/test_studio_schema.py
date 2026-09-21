@@ -38,6 +38,7 @@ from neutrino_database.models.enums import AllowedModuleEnum
 from neutrino_database.models.studio_schemas import (
     AgentConfig,
     Envelope,
+    Limits,
     Plan,
     PlanTask,
     TeamConfig,
@@ -60,6 +61,7 @@ from neutrino_database.models.tables import (
     studio_team_version,
     studio_test_case,
     studio_trigger_event,
+    studio_workspace_file,
     tenant,
     user as user_table,
     user_memory,
@@ -263,6 +265,72 @@ async def test_a_test_case_carries_its_own_files(test_engine):
     finally:
         async with test_engine.begin() as conn:
             await conn.execute(delete(tenant).where(tenant.c.id == tenant_id))
+
+
+@pytest.mark.asyncio
+async def test_a_studio_only_run_can_record_what_it_indexed(test_engine):
+    """``indexed`` needs a document id, not a chat artefact.
+
+    A run started from the Studio has no chat and so no artefact to hang the
+    flag off, but it indexes for real — the CHECK asks what was indexed, not
+    where the chat can open it, so that run can now tell the truth. The
+    nonsense it still refuses is a row claiming the index holds something it
+    cannot name.
+    """
+    async with test_engine.begin() as conn:
+        tenant_id, workspace_id, user_id = await _seed(conn)
+    try:
+        async with test_engine.begin() as conn:
+            _, _, run_id = await _seed_team_run(conn, tenant_id, workspace_id, user_id)
+            doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"neutrino:studio-run:{run_id}:out.md"))
+            # No chat, no artefact, and still indexed — the gap this closes.
+            await conn.execute(insert(studio_workspace_file).values(
+                id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id,
+                path="out.md", size_bytes=12, indexed=True, indexed_doc_id=doc_id,
+            ))
+            # An attempt ES answered for but did not finish: a doc id with the
+            # flag still false stays representable.
+            await conn.execute(insert(studio_workspace_file).values(
+                id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id,
+                path="partial.md", size_bytes=3, indexed=False, indexed_doc_id=doc_id,
+            ))
+            rows = dict((r[0], (r[1], r[2])) for r in (await conn.execute(
+                select(
+                    studio_workspace_file.c.path,
+                    studio_workspace_file.c.indexed,
+                    studio_workspace_file.c.indexed_doc_id,
+                ).where(studio_workspace_file.c.run_id == run_id)
+            )).fetchall())
+            assert rows["out.md"] == (True, doc_id)
+            assert rows["partial.md"] == (False, doc_id)
+            assert studio_workspace_file.c.indexed_doc_id.nullable
+
+        async with test_engine.begin() as conn:
+            with pytest.raises(IntegrityError):
+                await conn.execute(insert(studio_workspace_file).values(
+                    id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id,
+                    path="liar.md", size_bytes=1, indexed=True,
+                ))
+    finally:
+        async with test_engine.begin() as conn:
+            await conn.execute(delete(tenant).where(tenant.c.id == tenant_id))
+
+
+def test_max_questions_is_a_per_agent_limit():
+    """The harness reads ``limits.max_questions``; ``extra="forbid"`` meant a
+    builder who set it was rejected outright."""
+    assert Limits().max_questions == 3
+    assert Limits(max_questions=7).max_questions == 7
+    # 0 is a real setting: an agent that may never stop to ask.
+    assert Limits(max_questions=0).max_questions == 0
+    for bad in (-1, 21):
+        with pytest.raises(ValidationError):
+            Limits(max_questions=bad)
+    cfg = AgentConfig(
+        charter="c", model="m", output_schema={"type": "object"},
+        limits={"max_questions": 1},
+    )
+    assert cfg.limits.max_questions == 1
 
 
 def test_shared_contracts_refuse_partial_success():

@@ -4838,11 +4838,19 @@ studio_workspace_file = Table(
     # ``indexed`` only if the builder also opted it into Knowledge Studio.
     Column("promoted_artifact_id", UUID(as_uuid=False), ForeignKey("chat_artifact.id", ondelete="SET NULL"), nullable=True),
     Column("indexed", Boolean, nullable=False, server_default=text("false")),
+    # The ES document id the promotion created. A run started from the Studio
+    # has no chat and so no artefact to hang ``indexed`` off, but it indexes
+    # for real — this is where it says WHAT it indexed. Not an FK: the
+    # document lives in Elasticsearch, not here.
+    Column("indexed_doc_id", Text, nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     UniqueConstraint("run_id", "path", name="uq_studio_workspace_file_path"),
     CheckConstraint("size_bytes >= 0", name="ck_studio_workspace_file_size"),
-    CheckConstraint("NOT indexed OR promoted_artifact_id IS NOT NULL", name="ck_studio_workspace_file_indexed_promoted"),
+    # ``indexed`` may only be true when the row can say what was indexed.
+    # The artefact is NOT that thing: it is a chat convenience a Studio-only
+    # run never has. The document id is.
+    CheckConstraint("NOT indexed OR indexed_doc_id IS NOT NULL", name="ck_studio_workspace_file_indexed_doc"),
 )
 
 
