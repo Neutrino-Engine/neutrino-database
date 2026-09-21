@@ -218,12 +218,22 @@ class TeamConfig(_Strict):
 # ---------------------------------------------------------------------------
 
 class Brief(_Strict):
-    """What an agent receives. Never the parent's history (decision 6)."""
+    """What an agent receives. Never the parent's history (decision 6).
+
+    ``upstream`` is the exception the orchestrator does not write: the team
+    workflow fills it at dispatch with ``{alias: output}`` for every completed
+    task this one depends_on (A7 — "completed feeds its output into dependents'
+    briefs"). The orchestrator plans before those outputs exist, so anything it
+    puts in ``input`` about an upstream task is a promise it cannot keep; only
+    the workflow knows the real results.
+    """
     objective: str = Field(..., min_length=1)
     context: str = ""
     input: dict[str, Any] = Field(default_factory=dict)
     workspace_paths: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
+    # Filled by TeamRunWorkflow at dispatch, never by the orchestrator.
+    upstream: dict[str, Any] = Field(default_factory=dict)
 
 
 class PlanTask(_Strict):
