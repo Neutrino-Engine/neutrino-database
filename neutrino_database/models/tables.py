@@ -990,6 +990,10 @@ chat_artifact = Table(
     # Claude-style iterate-in-place bumps this ("update this artifact"); the
     # column exists now so the UX lands without a migration.
     Column("version", Integer, nullable=False, server_default=text("1")),
+    # Agent Studio: a team run's final output lands in chat as an artifact and
+    # links back to the run so the card can deep-link to the console. SET NULL:
+    # the artifact is the user's; the run record may be purged independently.
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
     # Lineage for revisualize/fork. Self-FK SET NULL so a derived artifact
     # survives its parent's deletion.
     Column(
@@ -1130,6 +1134,11 @@ user_memory = Table(
     # Who the memory is ABOUT. 'user' today; 'workspace'/'tenant' are reserved
     # so team-shared memory needs no migration, only a read-path change.
     Column("scope", String(16), nullable=False, server_default=text("'user'")),
+    # Agent Studio (decision 22): scope='team' memories belong to a Team, not a
+    # person. CASCADE with the team; agent_id records which specialist wrote it
+    # and is SET NULL so deleting an agent keeps what the team learned.
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=True),
+    Column("agent_id", UUID(as_uuid=False), ForeignKey("studio_agent.id", ondelete="SET NULL"), nullable=True),
     # fact       — durable, reusable state ("owns the APAC region")
     # preference — changes output shape ("wants the SQL shown")
     # correction — a domain fix ("revenue means net of returns")
@@ -1208,7 +1217,8 @@ user_memory = Table(
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
 
-    CheckConstraint("scope IN ('user', 'workspace', 'tenant')", name="ck_user_memory_scope"),
+    CheckConstraint("scope IN ('user', 'workspace', 'tenant', 'team')", name="ck_user_memory_scope"),
+    CheckConstraint("scope <> 'team' OR team_id IS NOT NULL", name="ck_user_memory_team_scope_has_team"),
     CheckConstraint("kind IN ('fact', 'preference', 'correction')", name="ck_user_memory_kind"),
     CheckConstraint("origin IN ('auto', 'explicit', 'manual')", name="ck_user_memory_origin"),
     CheckConstraint(
@@ -4424,4 +4434,461 @@ execution_proposal = Table(
         unique=True,
         postgresql_where=text("status IN ('pending', 'approved')"),
     ),
+)
+
+
+# ===========================================================================
+# Agent Studio (plans/AGENT-STUDIO-PLAN.md) — Agents, Teams, Runs.
+#
+# An Agent is a reusable specialist definition (charter, allowed tools, input
+# and output schema, limits). A Team is the deployable unit: an orchestrator
+# config plus a roster of pinned AgentVersions. A Run executes one TeamVersion
+# on Temporal and dispatches AgentTasks; every AgentTask returns a structured
+# Envelope. All runs share a per-run MinIO workspace, never transcripts.
+#
+# Statuses are String + CHECK (the user_memory rationale): every one of these
+# sets is expected to grow and a CHECK extends in one line where a PgEnum
+# ADD VALUE cannot be rolled back.
+#
+# The whole draft config lives in ``config`` JSONB. Only the fields the
+# database must index, join or constrain are promoted to columns; the shape of
+# ``config`` is owned by neutrino_database.models.studio_schemas.
+# ===========================================================================
+
+STUDIO_RUN_STATUSES = (
+    "planning", "dispatching", "waiting_approval", "paused", "finishing",
+    "completed", "failed", "cancelled",
+)
+STUDIO_TASK_STATUSES = (
+    "pending", "running", "waiting_approval", "completed", "error",
+    "budget_exhausted", "stalled", "schema_invalid", "cancelled", "approval_rejected",
+)
+STUDIO_TRIGGER_KINDS = ("chat", "studio", "api", "schedule", "event", "test")
+STUDIO_APPROVAL_OUTCOMES = ("allowed_once", "rejected", "cancelled", "unavailable")
+
+
+def _in(col: str, values) -> str:
+    return f"{col} IN ({', '.join(repr(v) for v in values)})"
+
+
+studio_agent = Table(
+    "studio_agent",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("description", Text, nullable=True),
+    # Draft config: charter, model, allowed_tools, input_schema, output_schema,
+    # limits, deny_list, memory_enabled, code_exec_enabled. Shape: AgentConfig.
+    Column("config", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # Platform template library (decision 16): a template is an agent owned by
+    # the platform; cloning copies config into the customer's workspace.
+    Column("is_template", Boolean, nullable=False, server_default=text("false")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("length(name) > 0", name="ck_studio_agent_name_not_blank"),
+    Index("ix_studio_agent_workspace", "tenant_id", "workspace_id", postgresql_where=text("deleted_at IS NULL")),
+    Index("ix_studio_agent_name", "workspace_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
+)
+
+
+studio_agent_version = Table(
+    "studio_agent_version",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("agent_id", UUID(as_uuid=False), ForeignKey("studio_agent.id", ondelete="CASCADE"), nullable=False),
+    Column("version", Integer, nullable=False),
+    # Immutable snapshot of studio_agent.config at publish time.
+    Column("config", JSONB, nullable=False),
+    # passed — every saved test case passed; overridden — published anyway,
+    # override_reason says why (decision 15). Recorded, never silent.
+    Column("test_gate_status", String(16), nullable=False),
+    Column("override_reason", Text, nullable=True),
+    Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("agent_id", "version", name="uq_studio_agent_version"),
+    CheckConstraint("version >= 1", name="ck_studio_agent_version_positive"),
+    CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_agent_version_gate"),
+    CheckConstraint(
+        "test_gate_status <> 'overridden' OR override_reason IS NOT NULL",
+        name="ck_studio_agent_version_override_reason",
+    ),
+)
+
+
+studio_team = Table(
+    "studio_team",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("description", Text, nullable=True),
+    # Draft config: orchestrator {model, limits}, guardrails, roster
+    # [{agent_id, agent_version_id, alias}], input_schema, output_schema,
+    # runs_as, approver_ids, notification_targets, approval_policy,
+    # memory_enabled, promoted_outputs. Shape: TeamConfig.
+    Column("config", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # Promoted to a column because the executor, the redaction pipeline and the
+    # promotion path all branch on it without wanting to parse config.
+    Column("sensitive", Boolean, nullable=False, server_default=text("false")),
+    # Workspaces whose members may run the published team (decision 16).
+    Column("published_to", ARRAY(UUID(as_uuid=False)), nullable=False, server_default=text("'{}'::uuid[]")),
+    Column("is_template", Boolean, nullable=False, server_default=text("false")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("length(name) > 0", name="ck_studio_team_name_not_blank"),
+    Index("ix_studio_team_workspace", "tenant_id", "workspace_id", postgresql_where=text("deleted_at IS NULL")),
+    Index("ix_studio_team_name", "workspace_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
+)
+
+
+studio_team_version = Table(
+    "studio_team_version",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("config", JSONB, nullable=False),
+    # [{alias, agent_id, agent_version_id}] — the exact agent snapshots this
+    # team version runs. Runs pin this, so replay is exact (decision 25).
+    Column("roster_pins", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("test_gate_status", String(16), nullable=False),
+    Column("override_reason", Text, nullable=True),
+    Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("team_id", "version", name="uq_studio_team_version"),
+    CheckConstraint("version >= 1", name="ck_studio_team_version_positive"),
+    CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_team_version_gate"),
+    CheckConstraint(
+        "test_gate_status <> 'overridden' OR override_reason IS NOT NULL",
+        name="ck_studio_team_version_override_reason",
+    ),
+)
+
+
+studio_api_key = Table(
+    "studio_api_key",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    # Teams this key may start. Empty means none — a key is never wildcard.
+    Column("team_ids", ARRAY(UUID(as_uuid=False)), nullable=False, server_default=text("'{}'::uuid[]")),
+    # sha256 of the plaintext; the plaintext is shown once at creation and
+    # never stored. ``prefix`` (nsk_ + 8 chars) is what the UI lists.
+    Column("key_hash", String(64), nullable=False, unique=True),
+    Column("prefix", String(16), nullable=False),
+    Column("rate_limit_per_min", Integer, nullable=False, server_default=text("60")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("revoked_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("last_used_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("rate_limit_per_min > 0", name="ck_studio_api_key_rate_positive"),
+    Index("ix_studio_api_key_workspace", "tenant_id", "workspace_id", postgresql_where=text("revoked_at IS NULL")),
+)
+
+
+studio_event_trigger = Table(
+    "studio_event_trigger",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    # poll — a Temporal workflow calls a connector list action on an interval;
+    # webhook — the gateway receiver signals the same workflow (decision 26).
+    Column("source", String(8), nullable=False),
+    # The connector (integration) the poll reads from; NULL for a generic webhook.
+    Column("integration_id", UUID(as_uuid=False), ForeignKey("integration.id", ondelete="SET NULL"), nullable=True),
+    # {action, interval_s, filter, item_key_field, input_mapping,
+    #  webhook_provider, secret_hash}. Never a plaintext secret.
+    Column("config", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("temporal_workflow_id", String(255), nullable=True),
+    # {status, last_poll_at, last_error, consecutive_failures} for the health chip.
+    Column("health", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    CheckConstraint(_in("source", ("poll", "webhook")), name="ck_studio_event_trigger_source"),
+    Index("ix_studio_event_trigger_team", "team_id"),
+)
+
+
+studio_schedule = Table(
+    "studio_schedule",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("cron", String(100), nullable=False),
+    Column("timezone", String(64), nullable=False, server_default=text("'UTC'")),
+    Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("temporal_schedule_id", String(255), nullable=True),
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Index("ix_studio_schedule_team", "team_id"),
+)
+
+
+studio_run = Table(
+    "studio_run",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    # NULL only for a test run of an unpublished draft (the draft config is
+    # frozen into ``team_config`` instead).
+    Column("team_version_id", UUID(as_uuid=False), ForeignKey("studio_team_version.id", ondelete="SET NULL"), nullable=True),
+    # The exact team config this run executed, whether from a version or a
+    # draft test run. Replay reads this, never the live draft.
+    Column("team_config", JSONB, nullable=False),
+    Column("status", String(32), nullable=False, server_default=text("'planning'")),
+    Column("is_test", Boolean, nullable=False, server_default=text("false")),
+    # Trigger attribution (decision 4 / 27). One of the four ids is set.
+    Column("trigger_kind", String(16), nullable=False),
+    Column("trigger_actor_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("api_key_id", UUID(as_uuid=False), ForeignKey("studio_api_key.id", ondelete="SET NULL"), nullable=True),
+    # No FK: studio_trigger_event points back here (run_id) and one side of
+    # the cycle has to be a plain column. The event row is the one that owns
+    # the relationship; this is a convenience pointer for the console.
+    Column("trigger_event_id", UUID(as_uuid=False), nullable=True),
+    # The conversation a chat-triggered run belongs to, so the finished team
+    # output can land as a chat_artifact (which requires a chat_id) and the
+    # card can deep-link. NULL for API, schedule and event runs. SET NULL so a
+    # deleted chat does not destroy the run record.
+    Column("chat_id", UUID(as_uuid=False), ForeignKey("chat.id", ondelete="SET NULL"), nullable=True),
+    Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("output", JSONB, nullable=True),
+    # The orchestrator's current task DAG: [{alias, agent_version_id, brief,
+    # depends_on, task_id}]. Rewritten on every re-plan; history is in run_events.
+    Column("plan", JSONB, nullable=True),
+    Column("workspace_prefix", Text, nullable=False),
+    # Fork lineage (decision 32). SET NULL so a fork survives its parent's purge.
+    Column("parent_run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
+    Column("fork_point_task_id", UUID(as_uuid=False), nullable=True),
+    # {tokens_in, tokens_out, tool_calls, wall_s, usd, sandbox_s} used vs cap.
+    Column("budgets", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("error", Text, nullable=True),
+    Column("temporal_workflow_id", String(255), nullable=True, unique=True),
+    Column("started_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("ended_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    CheckConstraint(_in("status", STUDIO_RUN_STATUSES), name="ck_studio_run_status"),
+    CheckConstraint(_in("trigger_kind", STUDIO_TRIGGER_KINDS), name="ck_studio_run_trigger_kind"),
+    CheckConstraint("parent_run_id IS NULL OR parent_run_id <> id", name="ck_studio_run_no_self_parent"),
+    Index("ix_studio_run_team_created", "tenant_id", "team_id", "created_at"),
+    Index("ix_studio_run_status", "tenant_id", "status"),
+    Index("ix_studio_run_parent", "parent_run_id"),
+)
+
+
+studio_agent_task = Table(
+    "studio_agent_task",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    Column("agent_id", UUID(as_uuid=False), ForeignKey("studio_agent.id", ondelete="SET NULL"), nullable=True),
+    Column("agent_version_id", UUID(as_uuid=False), ForeignKey("studio_agent_version.id", ondelete="SET NULL"), nullable=True),
+    # Frozen agent config for this task (replay-exact even if the version row goes).
+    Column("agent_config", JSONB, nullable=False),
+    Column("alias", String(100), nullable=False),
+    Column("attempt", Integer, nullable=False, server_default=text("1")),
+    # Brief: {objective, context, input, workspace_paths, constraints}.
+    Column("brief", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("status", String(32), nullable=False, server_default=text("'pending'")),
+    # Envelope fields (decision 31). Non-completed never reads as success.
+    Column("exit_reason", Text, nullable=True),
+    Column("output", JSONB, nullable=True),
+    Column("raw_text", Text, nullable=True),
+    Column("schema_errors", JSONB, nullable=True),
+    # <= 4 KB, scrubbed of tool inputs and credentials before it is written.
+    Column("diagnostic", Text, nullable=True),
+    Column("files_written", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("depends_on", ARRAY(UUID(as_uuid=False)), nullable=False, server_default=text("'{}'::uuid[]")),
+    Column("budgets", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("sandbox_id", String(255), nullable=True),
+    Column("temporal_workflow_id", String(255), nullable=True),
+    Column("started_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("ended_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    CheckConstraint(_in("status", STUDIO_TASK_STATUSES), name="ck_studio_agent_task_status"),
+    CheckConstraint("attempt >= 1", name="ck_studio_agent_task_attempt_positive"),
+    CheckConstraint("diagnostic IS NULL OR length(diagnostic) <= 4096", name="ck_studio_agent_task_diagnostic_cap"),
+    Index("ix_studio_agent_task_run_status", "run_id", "status"),
+)
+
+
+studio_approval = Table(
+    "studio_approval",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    # NULL for a mandatory gate the orchestrator raised between tasks.
+    Column("task_id", UUID(as_uuid=False), ForeignKey("studio_agent_task.id", ondelete="CASCADE"), nullable=True),
+    # {integration_id, action, payload, effect, summary} — the exact call that
+    # will be made. ``payload_hash`` is re-checked at execution (decision 29):
+    # a changed payload is refused, not sent.
+    Column("action", JSONB, nullable=False),
+    Column("payload_hash", String(64), nullable=False),
+    Column("approver_ids", ARRAY(UUID(as_uuid=False)), nullable=False, server_default=text("'{}'::uuid[]")),
+    # NULL while pending. Closed, fail-closed set (decision 8).
+    Column("outcome", String(16), nullable=True),
+    Column("decided_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("decided_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
+    # sha256 of the single-use token in the signed email link.
+    Column("token_hash", String(64), nullable=True, unique=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint(
+        f"outcome IS NULL OR {_in('outcome', STUDIO_APPROVAL_OUTCOMES)}",
+        name="ck_studio_approval_outcome",
+    ),
+    CheckConstraint(
+        "outcome IS NULL OR outcome = 'unavailable' OR decided_at IS NOT NULL",
+        name="ck_studio_approval_decided_at",
+    ),
+    Index("ix_studio_approval_pending", "tenant_id", "created_at", postgresql_where=text("outcome IS NULL")),
+    Index("ix_studio_approval_run", "run_id"),
+)
+
+
+studio_trigger_event = Table(
+    "studio_trigger_event",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    Column("trigger_id", UUID(as_uuid=False), ForeignKey("studio_event_trigger.id", ondelete="CASCADE"), nullable=False),
+    Column("source", String(8), nullable=False),
+    # Stable per item (drive item id, message id, issue key). The unique index
+    # below is the dedupe: a second sighting is a no-op insert.
+    Column("item_key", Text, nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("received_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
+    Column("error", Text, nullable=True),
+    CheckConstraint(_in("source", ("poll", "webhook")), name="ck_studio_trigger_event_source"),
+    UniqueConstraint("team_id", "item_key", name="uq_studio_trigger_event_item"),
+    Index("ix_studio_trigger_event_trigger", "trigger_id", "received_at"),
+)
+
+
+studio_test_case = Table(
+    "studio_test_case",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    # Polymorphic subject: an agent or a team. No FK, the service resolves it;
+    # deletion of the subject soft-deletes and the index keeps lookups cheap.
+    Column("subject_kind", String(8), nullable=False),
+    Column("subject_id", UUID(as_uuid=False), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # A case is input + files + assertions: the case OWNS its files, so "Run
+    # all" runs each case with its own and nothing is attached by hand. Same
+    # inbound descriptors a run start takes (app/studio/inbound_files.py):
+    # [{"attachment_id": ...}] or [{"bucket", "key", "filename"}]. They land in
+    # the run workspace at files/<filename>, which is what an input field like
+    # document_path names.
+    Column("files", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    # [{path, op, expected}] evaluated against the output after schema validation.
+    Column("assertions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("last_result", String(16), nullable=False, server_default=text("'never_run'")),
+    Column("last_run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint(_in("subject_kind", ("agent", "team")), name="ck_studio_test_case_subject_kind"),
+    CheckConstraint(_in("last_result", ("passed", "failed", "never_run")), name="ck_studio_test_case_last_result"),
+    Index("ix_studio_test_case_subject", "subject_kind", "subject_id", postgresql_where=text("deleted_at IS NULL")),
+)
+
+
+studio_workspace_file = Table(
+    "studio_workspace_file",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    # Relative to studio_run.workspace_prefix.
+    Column("path", Text, nullable=False),
+    Column("size_bytes", BigInteger, nullable=False, server_default=text("0")),
+    Column("content_type", String(255), nullable=True),
+    Column("writer_task_id", UUID(as_uuid=False), ForeignKey("studio_agent_task.id", ondelete="SET NULL"), nullable=True),
+    # Promotion (decision 11): set when the file became a durable artefact;
+    # ``indexed`` only if the builder also opted it into Knowledge Studio.
+    Column("promoted_artifact_id", UUID(as_uuid=False), ForeignKey("chat_artifact.id", ondelete="SET NULL"), nullable=True),
+    Column("indexed", Boolean, nullable=False, server_default=text("false")),
+    # The ES document id the promotion created. A run started from the Studio
+    # has no chat and so no artefact to hang ``indexed`` off, but it indexes
+    # for real — this is where it says WHAT it indexed. Not an FK: the
+    # document lives in Elasticsearch, not here.
+    Column("indexed_doc_id", Text, nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    UniqueConstraint("run_id", "path", name="uq_studio_workspace_file_path"),
+    CheckConstraint("size_bytes >= 0", name="ck_studio_workspace_file_size"),
+    # ``indexed`` may only be true when the row can say what was indexed.
+    # The artefact is NOT that thing: it is a chat convenience a Studio-only
+    # run never has. The document id is.
+    CheckConstraint("NOT indexed OR indexed_doc_id IS NOT NULL", name="ck_studio_workspace_file_indexed_doc"),
+)
+
+
+# ---------------------------------------------------------------------------
+# studio_run_event — the durable event log a run is replayed from.
+#
+# NOT the legacy ``run_events``: that table's ``run_id`` is String(26) with an
+# FK to the pre-existing ``runs`` table, and a studio run id is a 36-char UUID.
+# Rather than widen a column every other pillar depends on, Agent Studio owns
+# its own log.
+#
+# ``seq`` is the resumable cursor: the SSE endpoint sends it as the event id,
+# a reconnecting client returns it as Last-Event-ID, and replay is
+# ``WHERE run_id = :r AND seq > :last ORDER BY seq``. It is assigned by the
+# writer, not a sequence object, so a batch of events written in one flush
+# keeps the order the agent produced them in.
+#
+# ``payload`` holds exactly what the model or the operator saw: already
+# spilled, already redacted for a sensitive team. The raw payload, when one is
+# kept, lives in the run workspace under ``raw/``, never here.
+# ---------------------------------------------------------------------------
+studio_run_event = Table(
+    "studio_run_event",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    Column("seq", BigInteger, nullable=False),
+    # Which agent task produced it; NULL for run-level events (status, plan).
+    Column("task_id", UUID(as_uuid=False), ForeignKey("studio_agent_task.id", ondelete="SET NULL"), nullable=True),
+    Column("agent_alias", String(100), nullable=True),
+    Column("type", String(48), nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    CheckConstraint("seq >= 0", name="ck_studio_run_event_seq"),
+    UniqueConstraint("run_id", "seq", name="uq_studio_run_event_seq"),
+    # The only read path: replay from a cursor, in order.
+    Index("ix_studio_run_event_run_seq", "run_id", "seq"),
 )

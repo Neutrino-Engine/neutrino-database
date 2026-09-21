@@ -25,6 +25,7 @@ class AllowedModuleEnum(str, Enum):
     WEB_SEARCH = "Web Search"
     DEEP_RESEARCH = "Deep Research"
     DASHBOARDS = "Dashboards"
+    AGENT_STUDIO = "Agent Studio"
 
 class UserStatusEnum(str, Enum):
     INVITED = "INVITED"
@@ -160,6 +161,12 @@ class PillarEnum(str, Enum):
     ENTERPRISE_SEARCH = "ENTERPRISE_SEARCH"
     DATA_ANALYTICS = "DATA_ANALYTICS"
     WORKFLOW_EXECUTION = "WORKFLOW_EXECUTION"
+    # Agent Studio (plans/AGENT-STUDIO-PLAN.md). A workspace-level capability
+    # like the other three: the sidebar entry and every studio route key on
+    # it being in ``workspace.enabled_pillars``. ``tenant.allowed_modules``
+    # carries the matching AllowedModuleEnum value, but that column is
+    # inert today, so this is the gate that actually decides.
+    AGENT_STUDIO = "AGENT_STUDIO"
 
 
 class RetrievalStrategyEnum(str, Enum):
