@@ -18,9 +18,7 @@ from neutrino_database.models.enums import (
     DashboardStatusEnum,
     DashboardVisibilityEnum,
     DashboardWidgetTypeEnum,
-    EstateScopeKindEnum,
     ExcelDatasetStatus,
-    ExecutionProposalStatusEnum,
     IdpProviderEnum,
     IntegrationAuthKindEnum,
     IntegrationEnablementStatusEnum,
@@ -485,11 +483,6 @@ class Chat(Base):
     # TD-DA-PILLAR-PERSIST — pillar this chat was initiated on. NULL for
     # Unified (AUTO, spans all pillars) and legacy pre-column rows.
     pillar: Mapped[Optional[PillarEnum]]
-    # ITOps merge S5 — the estate resource this conversation is about. NULL
-    # for every non-estate chat. estate_uid is not a FK: it lives in Neo4j.
-    estate_scope_kind: Mapped[Optional[EstateScopeKindEnum]]
-    estate_uid: Mapped[Optional[str]]
-    estate_display_name: Mapped[Optional[str]]
     # DA data scope (only set when pillar == DATA_ANALYTICS). Mirrors the
     # FE text_to_sql_config so a reopened DA chat restores its schema.
     # NC-474 — ``da_connection_id`` is the authoritative pin; the name is kept
@@ -1640,65 +1633,9 @@ class Workflow(Base):
     description: Mapped[Optional[str]]
     graph: Mapped[dict]
     status: Mapped[WorkflowStatusEnum]
-    published_revision_id: Mapped[Optional[str]]
     created_by: Mapped[Optional[str]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
-
-
-class WorkflowRevision(Base):
-    """An immutable published revision of a workflow (ITOps merge §5).
-
-    Publication freezes the draft's ``graph`` and its ``input_schema`` here and
-    points ``workflow.published_revision_id`` at the row; editing the draft
-    never touches a revision. Runs record which revision they used, so history
-    stays readable after a republish.
-    """
-
-    __table__ = tables.workflow_revision
-
-    id: Mapped[str]
-    workflow_id: Mapped[str]
-    tenant_id: Mapped[str]
-    workspace_id: Mapped[str]
-    revision_number: Mapped[int]
-    graph: Mapped[dict]
-    input_schema: Mapped[list]
-    created_by: Mapped[Optional[str]]
-    created_at: Mapped[datetime]
-
-
-class ExecutionProposal(Base):
-    """An agent-proposed execution awaiting a human decision (ITOps merge §4.1).
-
-    The unit of approval. The row freezes the exact ``graph``, the resolved
-    ``inputs`` and the targets they name, and ``digest`` is a sha256 over that
-    pair; the decision binds to the digest, so a changed procedure or target is
-    a new proposal rather than a re-decision of this one. ``workflow_id`` /
-    ``revision_id`` are NULL for a one-off the agent composed. Credentials never
-    land here — connector binding IDs and script bodies do, so a run stays
-    reviewable and repeatable.
-    """
-
-    __table__ = tables.execution_proposal
-
-    id: Mapped[str]
-    tenant_id: Mapped[str]
-    workspace_id: Mapped[str]
-    workflow_id: Mapped[Optional[str]]
-    revision_id: Mapped[Optional[str]]
-    chat_id: Mapped[Optional[str]]
-    graph: Mapped[dict]
-    inputs: Mapped[dict]
-    preview: Mapped[dict]
-    digest: Mapped[str]
-    status: Mapped[ExecutionProposalStatusEnum]
-    requested_by: Mapped[Optional[str]]
-    decided_by: Mapped[Optional[str]]
-    decided_at: Mapped[Optional[datetime]]
-    run_id: Mapped[Optional[str]]
-    expires_at: Mapped[datetime]
-    created_at: Mapped[datetime]
 
 
 class WorkflowRun(Base):
@@ -1710,10 +1647,6 @@ class WorkflowRun(Base):
     ``finished_at``. ``workflow_version_id`` / ``trigger_id`` are unconstrained
     UUIDs until M6 / M4 add their tables. Temporal owns the step-by-step event
     history; this row + ``WorkflowRunStep`` are the queryable, auditable record.
-
-    ``workflow_id`` is nullable: a one-off run (spec S1) has no library
-    workflow behind it and instead carries its own ``graph_snapshot``, which
-    every run keeps regardless so history survives a draft edit or republish.
     """
 
     __table__ = tables.workflow_run
@@ -1721,7 +1654,7 @@ class WorkflowRun(Base):
     id: Mapped[str]
     tenant_id: Mapped[str]
     workspace_id: Mapped[str]
-    workflow_id: Mapped[Optional[str]]
+    workflow_id: Mapped[str]
     workflow_version_id: Mapped[Optional[str]]
     trigger_id: Mapped[Optional[str]]
     status: Mapped[WorkflowRunStatusEnum]
@@ -1731,7 +1664,6 @@ class WorkflowRun(Base):
     temporal_run_id: Mapped[Optional[str]]
     trigger_payload: Mapped[Optional[dict]]
     error_message: Mapped[Optional[str]]
-    graph_snapshot: Mapped[Optional[dict]]
     created_at: Mapped[datetime]
     started_at: Mapped[Optional[datetime]]
     finished_at: Mapped[Optional[datetime]]
