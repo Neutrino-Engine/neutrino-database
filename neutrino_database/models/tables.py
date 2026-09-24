@@ -797,6 +797,11 @@ chat = Table(
     ),
     Column("da_connection_name", String, nullable=True),
     Column("da_schema_name", String, nullable=True),
+    # NC-694 — last message of the draft path the user sees (see
+    # ``message.parent_message_id``). ponytail: no FK, so deleting that message
+    # leaves it dangling and readers fall back to the newest message; add a
+    # SET NULL FK (with use_alter for the chat/message cycle) if that matters.
+    Column("active_leaf_message_id", UUID(as_uuid=False), nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
@@ -837,11 +842,22 @@ message = Table(
     Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("role", PgEnum(MessageRoleEnum, name="message_role"), nullable=False, default=MessageRoleEnum.USER),
     Column("content", Text, nullable=False),
+    # NC-694 — drafts. A user message points at the assistant reply before it
+    # (NULL for the first question); an assistant message points at the
+    # question it answers. Regenerating adds a sibling reply, editing a
+    # question adds a sibling question.
+    Column(
+        "parent_message_id",
+        UUID(as_uuid=False),
+        ForeignKey("message.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
 
     Index("ix_message_chat_created_at", "chat_id", "created_at"),
+    Index("ix_message_parent_message_id", "parent_message_id"),
     Index("ix_message_tenant_chat", "tenant_id", "chat_id"),
     Index("ix_message_user_id", "user_id"),
 )
