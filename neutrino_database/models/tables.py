@@ -3203,7 +3203,9 @@ dashboard = Table(
             values_callable=lambda enum: [e.value for e in enum],
         ),
         nullable=False,
-        server_default=text("'workspace_members'"),
+        # NC-691: private until shared. Rows created before the change keep
+        # 'workspace_members' (the migration alters only the default).
+        server_default=text("'restricted'"),
     ),
     # Back-pointer to the build chat. 1:1. SET NULL because the chat
     # can be purged independently (compliance) — the dashboard widgets
@@ -3450,6 +3452,38 @@ dashboard_link_token = Table(
         "dashboard_id",
         postgresql_where=text("revoked_at IS NULL"),
     ),
+)
+
+
+# ---------------------------------------------------------------------------
+# dashboard_share — the members a ``restricted`` dashboard is shared with
+# (NC-691, closes TD-DASH-INTERNAL-SHARE-1).
+#
+# A restricted dashboard is visible to its owner and to exactly these users; a
+# ``workspace_members`` one to every member of its workspace. One row per
+# (dashboard, user); read-only access, since writes stay curate-gated.
+# ---------------------------------------------------------------------------
+dashboard_share = Table(
+    "dashboard_share",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column(
+        "dashboard_id",
+        UUID(as_uuid=False),
+        ForeignKey("dashboard.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "user_id",
+        UUID(as_uuid=False),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("dashboard_id", "user_id", name="ux_dashboard_share_dashboard_user"),
+    # "Which dashboards were shared with me?" — the list filter's EXISTS probe.
+    Index("ix_dashboard_share_user", "user_id"),
 )
 
 # ---------------------------------------------------------------------------
