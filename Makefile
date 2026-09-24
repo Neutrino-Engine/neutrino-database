@@ -21,7 +21,7 @@
 
 .PHONY: help install install-deps test test-verbose \
         setup-test-db drop-test-db recreate-test-db clean \
-        db-upgrade migrate-fga migrate
+        db-upgrade backfill-authz-store migrate-fga migrate
 
 ENV_NAME       := neutrino-db
 PYTHON_VERSION := 3.12
@@ -53,8 +53,9 @@ help:
 	@echo ""
 	@echo "Migrations (run on deploy, in this order):"
 	@echo "  db-upgrade           alembic upgrade head (Postgres schema)"
+	@echo "  backfill-authz-store Map pre-existing OpenFGA doc-ACL stores onto workspace_authz_store"
 	@echo "  migrate-fga          Converge every OpenFGA store to the canonical model"
-	@echo "  migrate              db-upgrade THEN migrate-fga (the full deploy step)"
+	@echo "  migrate              the full deploy step"
 
 install:
 	conda create -n $(ENV_NAME) python=$(PYTHON_VERSION) -y
@@ -89,10 +90,14 @@ clean:
 db-upgrade:
 	alembic upgrade head
 
+# Idempotent — safe on every deploy; an already-mapped workspace is left alone.
+backfill-authz-store:
+	OPENFGA_API_URL=$(OPENFGA_API_URL) python -m neutrino_database.fga.backfill_workspace_authz_store
+
 migrate-fga:
 	OPENFGA_API_URL=$(OPENFGA_API_URL) python -m neutrino_database.fga.migrate
 
-migrate: db-upgrade migrate-fga
+migrate: db-upgrade backfill-authz-store migrate-fga
 
 # ------------------------------------------------------------------
 # Test-database management. Mirrors gateway/Makefile.

@@ -25,6 +25,7 @@ class AllowedModuleEnum(str, Enum):
     WEB_SEARCH = "Web Search"
     DEEP_RESEARCH = "Deep Research"
     DASHBOARDS = "Dashboards"
+    AGENT_STUDIO = "Agent Studio"
 
 class UserStatusEnum(str, Enum):
     INVITED = "INVITED"
@@ -160,6 +161,12 @@ class PillarEnum(str, Enum):
     ENTERPRISE_SEARCH = "ENTERPRISE_SEARCH"
     DATA_ANALYTICS = "DATA_ANALYTICS"
     WORKFLOW_EXECUTION = "WORKFLOW_EXECUTION"
+    # Agent Studio (plans/AGENT-STUDIO-PLAN.md). A workspace-level capability
+    # like the other three: the sidebar entry and every studio route key on
+    # it being in ``workspace.enabled_pillars``. ``tenant.allowed_modules``
+    # carries the matching AllowedModuleEnum value, but that column is
+    # inert today, so this is the gate that actually decides.
+    AGENT_STUDIO = "AGENT_STUDIO"
 
 
 class RetrievalStrategyEnum(str, Enum):
@@ -192,6 +199,12 @@ class ServiceType(str, Enum):
     AZURE_OPENAI = "azure_openai"
     LANDINGAI = "landingai"
     BEDROCK = "bedrock"
+    # NC-526 — OpenRouter is an OpenAI-compatible aggregator, but it gets its
+    # own service type rather than riding "openai": its model ids are
+    # namespaced ("vendor/model"), its catalog is fetched at runtime, and it
+    # needs per-model reasoning-budget control that the OpenAI preset has no
+    # field for.
+    OPENROUTER = "openrouter"
 
 
 class ProviderCategory(str, Enum):
@@ -443,19 +456,75 @@ class DashboardStatusEnum(str, Enum):
 
 
 class DashboardVisibilityEnum(str, Enum):
-    """Audience scope for a published dashboard.
+    """Who can see a dashboard (NC-691).
 
-    workspace_members — every member of the workspace can view (default
-                        for published dashboards).
-    restricted        — explicit member / group allowlist via
-                        dashboard_share rows. (v2; the table doesn't
-                        ship in DA-P3.1 — TD-DASH-INTERNAL-SHARE-1.)
-    link_only         — unlisted; only a link-token holder can view.
-                        No workspace-member access by default.
+    restricted        — the owner plus the members listed in
+                        ``dashboard_share``. The default for new
+                        dashboards: nobody else sees one until it is shared.
+    workspace_members — every member of the workspace ("published to the
+                        workspace"). Every dashboard created before NC-691
+                        carries this value, so existing boards keep their
+                        audience.
+    link_only         — never written; read as ``restricted``.
     """
     WORKSPACE_MEMBERS = "workspace_members"
     RESTRICTED = "restricted"
     LINK_ONLY = "link_only"
+
+
+class DataBindingKindEnum(str, Enum):
+    """Which query language a dashboard widget's data_binding speaks.
+
+    A widget re-executes its query on every dashboard load, so the binding has
+    to say what kind of query it holds. This is an EXPLICIT tag rather than
+    something each consumer infers from which fields are populated, because
+    inference does not scale: every new datasource would mean editing every
+    reader (the FE's execute call, the public share executor, the pin mapper),
+    and a reader that had not been taught the new shape would silently treat it
+    as one of the old ones.
+
+    With a tag, adding a datasource is: one member here, one row in
+    ``DATA_BINDING_FORMS``, and the DA tool that produces it. Readers dispatch
+    on the tag and need no change.
+
+    relational — SQL over a warehouse / relational database.
+    document   — an aggregation pipeline over a collection (MongoDB).
+
+    Absent on widgets written before this tag existed; those are all relational,
+    and DashboardWidgetDataBinding infers that for them.
+    """
+    RELATIONAL = "relational"
+    DOCUMENT = "document"
+
+
+# Per-kind contract: the fields that must be present, and the connector-service
+# route that executes it. THE table to extend for a new datasource — an Iceberg
+# or Trino binding is a member above plus a row here, and every consumer that
+# dispatches on the tag keeps working untouched.
+#
+# ``execute_route`` is the suffix under
+# ``/api/v1/da/connections/{connection_id}/`` — shared so the authed widget
+# fetch, the anonymous share-link executor and any future caller cannot drift
+# apart on which endpoint runs which binding.
+#
+# ``body_fields`` are the binding fields that make up that route's request body.
+# Here rather than at each caller because the anonymous share-link executor
+# lives in the gateway and the authed fetch lives in the frontend — two repos
+# that would otherwise each hardcode a per-source body and drift. Note it is
+# NOT simply ``required``: a relational binding needs ``schema_name`` to be
+# valid but the execute route does not take it.
+DATA_BINDING_FORMS: dict[DataBindingKindEnum, dict[str, object]] = {
+    DataBindingKindEnum.RELATIONAL: {
+        "required": ("schema_name", "sql"),
+        "execute_route": "execute_query",
+        "body_fields": ("sql",),
+    },
+    DataBindingKindEnum.DOCUMENT: {
+        "required": ("database", "collection", "pipeline"),
+        "execute_route": "execute_pipeline",
+        "body_fields": ("database", "collection", "pipeline"),
+    },
+}
 
 
 class DashboardWidgetTypeEnum(str, Enum):

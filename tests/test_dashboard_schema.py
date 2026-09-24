@@ -516,3 +516,119 @@ class TestChatExtensions:
             f"chat.dashboard_id ondelete must be CASCADE; got "
             f"{_ondelete(dash_fk)!r}"
         )
+
+
+class TestWidgetSourceArtifact:
+    """dashboard_widget.source_artifact_id — which chat chart a widget came from.
+
+    Pin-to-dashboard shows the link both ways: the chat card says "On
+    <dashboard>", the widget says "from chat". Neither survived a refresh,
+    because nothing durable recorded the pairing.
+
+    created_by_message_id cannot stand in for it. Native da_chart artifacts are
+    persisted BEFORE the assistant message is finalized (message_id=None, on
+    purpose, so the artifact_id can ride the envelope), so that column is NULL
+    on exactly the charts users pin. And a message can hold several charts, so a
+    message id could not say WHICH one anyway.
+    """
+
+    @pytest.mark.asyncio
+    async def test_column_exists_and_is_nullable(self, test_engine):
+        async with test_engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.text(
+                        "SELECT data_type, is_nullable FROM "
+                        "information_schema.columns WHERE table_name = "
+                        "'dashboard_widget' AND column_name = "
+                        "'source_artifact_id'"
+                    )
+                )
+            ).one_or_none()
+        assert row is not None, "source_artifact_id missing from dashboard_widget"
+        # Nullable because every build-agent-proposed widget has no chat chart
+        # behind it.
+        assert row[1] == "YES"
+
+    @pytest.mark.asyncio
+    async def test_fk_sets_null_rather_than_cascading(self, test_engine):
+        """The widget must OUTLIVE its provenance: the query it runs is its own,
+        so a compliance-purged artifact must not delete a live dashboard tile.
+        Same rule created_by_message_id already follows."""
+        async with test_engine.connect() as conn:
+            rule = (
+                await conn.execute(
+                    sa.text(
+                        "SELECT rc.delete_rule "
+                        "FROM information_schema.referential_constraints rc "
+                        "JOIN information_schema.key_column_usage kcu "
+                        "  ON kcu.constraint_name = rc.constraint_name "
+                        "WHERE kcu.table_name = 'dashboard_widget' "
+                        "  AND kcu.column_name = 'source_artifact_id'"
+                    )
+                )
+            ).scalar_one_or_none()
+        assert rule == "SET NULL", f"expected SET NULL, got {rule!r}"
+
+    @pytest.mark.asyncio
+    async def test_reverse_lookup_is_indexed(self, test_engine):
+        """The chat card asks "which dashboards hold this chart?" on render, so
+        this must not be a sequential scan over every widget in the tenant."""
+        async with test_engine.connect() as conn:
+            idx = (
+                await conn.execute(
+                    sa.text(
+                        "SELECT indexdef FROM pg_indexes WHERE tablename = "
+                        "'dashboard_widget' AND indexname = "
+                        "'ix_dashboard_widget_source_artifact'"
+                    )
+                )
+            ).scalar_one_or_none()
+        assert idx is not None, "reverse-lookup index missing"
+        assert "source_artifact_id" in idx
+
+
+class TestDashboardPinned:
+    """dashboard.pinned — keep a board at the top of the sidebar switcher.
+
+    The rail lists dashboards the way it lists chats, and chat rows have had
+    rename / pin / delete for a long time. Pin was the only one with nowhere to
+    go: chat.pinned existed, dashboard had no equivalent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_matches_chat_pinned_exactly(self, test_engine):
+        """Both rails sort by the same rule, so the two columns should not
+        differ in nullability or default — and an existing dashboard must not
+        need a backfill to be un-pinned."""
+        async with test_engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.text(
+                        "SELECT table_name, data_type, is_nullable, "
+                        "column_default FROM information_schema.columns "
+                        "WHERE column_name = 'pinned' "
+                        "AND table_name IN ('chat', 'dashboard') "
+                        "ORDER BY table_name"
+                    )
+                )
+            ).all()
+        shapes = {r[0]: (r[1], r[2], r[3]) for r in rows}
+        assert "dashboard" in shapes, "dashboard.pinned is missing"
+        assert shapes["dashboard"] == shapes["chat"], (
+            f"dashboard.pinned {shapes['dashboard']} differs from "
+            f"chat.pinned {shapes['chat']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_unpinned(self, test_engine):
+        async with test_engine.connect() as conn:
+            default = (
+                await conn.execute(
+                    sa.text(
+                        "SELECT column_default FROM information_schema.columns "
+                        "WHERE table_name='dashboard' AND column_name='pinned'"
+                    )
+                )
+            ).scalar_one()
+        assert "false" in str(default).lower()

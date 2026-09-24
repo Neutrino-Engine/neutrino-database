@@ -1,5 +1,6 @@
 from sqlalchemy import (
-    Table, Column, Integer, SmallInteger, String, Text, TIMESTAMP, Index, Float, ForeignKey, BigInteger, Enum as PgEnum,
+    Date, BigInteger,
+    Table, Column, Integer, SmallInteger, String, Text, TIMESTAMP, DateTime, Index, Float, ForeignKey, BigInteger, Enum as PgEnum,
     UniqueConstraint, Numeric, DDL, event, CheckConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY, INET
@@ -467,6 +468,20 @@ tenant_authz_store = Table(
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
 )
 
+workspace_authz_store = Table(
+    "workspace_authz_store",
+    metadata,
+    Column(
+        "workspace_id",
+        UUID(as_uuid=False),
+        ForeignKey("workspace.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("store_id", String(64), nullable=True),
+    Column("model_id", String(64), nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now()),
+)
+
 tenant = Table(
     "tenant",
     metadata,
@@ -832,6 +847,31 @@ message = Table(
 )
 
 
+# Thumbs up/down on an assistant reply. One row per (message, user): rating
+# again overwrites. score/comment/expected are the optional detail the
+# thumbs-down dialog collects; a thumbs-up leaves them NULL.
+message_feedback = Table(
+    "message_feedback",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("message_id", UUID(as_uuid=False), ForeignKey("message.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("rating", String(8), nullable=False),
+    Column("score", SmallInteger, nullable=True),
+    Column("comment", Text, nullable=True),
+    Column("expected", Text, nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+
+    UniqueConstraint("message_id", "user_id", name="ux_message_feedback_message_user"),
+    CheckConstraint("rating IN ('up', 'down')", name="ck_message_feedback_rating"),
+    CheckConstraint("score IS NULL OR score BETWEEN 1 AND 5", name="ck_message_feedback_score"),
+    Index("ix_message_feedback_tenant_created", "tenant_id", "created_at"),
+)
+
+
 # NC-137 — ephemeral, conversation-scoped file attachments for Unified
 # Chat (Claude-style upload-and-analyse). DELIBERATELY separate from
 # Enterprise Search ingestion (permanent, indexed, ACL'd via `files`) and
@@ -957,6 +997,10 @@ chat_artifact = Table(
     # Claude-style iterate-in-place bumps this ("update this artifact"); the
     # column exists now so the UX lands without a migration.
     Column("version", Integer, nullable=False, server_default=text("1")),
+    # Agent Studio: a team run's final output lands in chat as an artifact and
+    # links back to the run so the card can deep-link to the console. SET NULL:
+    # the artifact is the user's; the run record may be purged independently.
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
     # Lineage for revisualize/fork. Self-FK SET NULL so a derived artifact
     # survives its parent's deletion.
     Column(
@@ -1054,6 +1098,226 @@ share_link = Table(
 )
 
 
+
+# ---------------------------------------------------------------------------
+# user_memory (NC-519) — long-term, per-user agent memory.
+#
+# NC-416's context window solves conversation LENGTH; it does nothing across
+# conversations, and its compaction actively discards the detail a memory layer
+# wants to keep. This table is the cross-chat half: durable facts, preferences
+# and corrections that survive the chat they were learned in.
+#
+# Postgres is the SOURCE OF TRUTH. A mirror doc lands in the per-tenant
+# Elasticsearch index ``memories_tenant_{tenant}`` purely for hybrid retrieval
+# (BM25 + kNN) and is rebuildable from these rows at any time — so an ES outage
+# degrades recall, never correctness.
+#
+# Scoping: keyed on ``user_id`` (the JWT's ``user_id``), NOT ``member.id``.
+# Document ACLs are member-keyed because the file-permission store keys by
+# member (NC-131), but memory is ours end-to-end and agent-platform already
+# holds user_id from the internal token — keying on it avoids a
+# connector-service round-trip on every turn.
+#
+# ``kind`` / ``origin`` / ``scope`` are String + CHECK rather than PgEnum, a
+# deliberate deviation from chat_artifact.kind: all three sets are expected to
+# GROW (procedural memories, workspace-shared scope), and extending a CHECK is
+# a one-line migration where ALTER TYPE ... ADD VALUE cannot be rolled back.
+# ---------------------------------------------------------------------------
+user_memory = Table(
+    "user_memory",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    # NOT NULL and CASCADE: a memory has no meaning without its subject, and a
+    # deleted user's memories must not outlive them (GDPR erasure rides the FK).
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    # NULLABLE, unlike chat.workspace_id (X-CHAT-WS-1). v1 always writes it set,
+    # so memory learned in one workspace does not leak into another. NULL is
+    # reserved for "follows the user across workspaces" — a product decision we
+    # have not taken yet, and the column shape must not force it either way.
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=True),
+
+    # Who the memory is ABOUT. 'user' today; 'workspace'/'tenant' are reserved
+    # so team-shared memory needs no migration, only a read-path change.
+    Column("scope", String(16), nullable=False, server_default=text("'user'")),
+    # Agent Studio (decision 22): scope='team' memories belong to a Team, not a
+    # person. CASCADE with the team; agent_id records which specialist wrote it
+    # and is SET NULL so deleting an agent keeps what the team learned.
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=True),
+    Column("agent_id", UUID(as_uuid=False), ForeignKey("studio_agent.id", ondelete="SET NULL"), nullable=True),
+    # fact       — durable, reusable state ("owns the APAC region")
+    # preference — changes output shape ("wants the SQL shown")
+    # correction — a domain fix ("revenue means net of returns")
+    # Deliberately no 'episodic': "what happened in chat X" is what chat history
+    # and the artifact index already are, and duplicating it invites recall of
+    # stale narrative.
+    Column("kind", String(32), nullable=False),
+    Column("content", Text, nullable=False),
+    # sha256 of the normalized content. Lets the extractor short-circuit an
+    # exact repeat to NOOP without spending an LLM call on reconciliation, and
+    # backs the per-user uniqueness index below.
+    Column("content_hash", String(64), nullable=False),
+    Column("confidence", Float, nullable=False, server_default=text("0.5")),
+    # How many separate turns have asserted this. Reinforcement, not a guess:
+    # an extractor's confidence number is its own opinion, whereas being said
+    # twice is evidence. Drives promotion out of `candidate` (see `status`).
+    Column("observation_count", Integer, nullable=False, server_default=text("1")),
+    # candidate — extracted once, NOT injected yet. Held until a second
+    #             observation promotes it, which is the cheapest defence against
+    #             the overgeneralisation that makes consolidated memory decay
+    #             below a no-memory baseline (arXiv 2605.12978).
+    # active    — injected into turns.
+    # proposed  — recognised as ORG knowledge, not personal: it names something
+    #             in the DA catalog, so it was routed there as an
+    #             `ai_suggested` description for review instead of becoming one
+    #             analyst's private definition. Never injected.
+    Column("status", String(16), nullable=False, server_default=text("'active'")),
+    # auto     — background extraction
+    # explicit — the agent called save_memory ("remember that…")
+    # manual   — the user typed it into the Memory settings tab
+    Column("origin", String(16), nullable=False),
+
+    # The verbatim span this memory was derived from. Keeping it makes a memory
+    # a claim ABOUT evidence rather than a replacement for it: a wrong
+    # abstraction can be re-derived, and a consolidation pass can be diffed
+    # against the source instead of being trusted. Anthropic's Dreams keeps the
+    # input store for this reason; OpenAI's Dreaming V3 overwrites in place and
+    # gives up the ability to tell whether it is working.
+    Column("source_excerpt", Text, nullable=True),
+
+    # BI-TEMPORAL, kept separate from created_at on purpose:
+    #   created_at            — when WE learned it
+    #   valid_from / valid_to — when it was true in the world
+    # "Worked on APAC until March" needs both, and a store that only knows when
+    # it heard something cannot resolve two memories that disagree. NULL
+    # valid_to means "still true as far as we know".
+    Column("valid_from", TIMESTAMP(timezone=True), nullable=True),
+    Column("valid_to", TIMESTAMP(timezone=True), nullable=True),
+
+    # Provenance — "learned in this chat". SET NULL, not CASCADE: a memory is a
+    # durable conclusion that must outlive the conversation that produced it
+    # (same reasoning as chat_artifact.message_id).
+    Column("source_chat_id", UUID(as_uuid=False), ForeignKey("chat.id", ondelete="SET NULL"), nullable=True),
+    Column("source_message_id", UUID(as_uuid=False), ForeignKey("message.id", ondelete="SET NULL"), nullable=True),
+
+    # Reconciliation lineage. An UPDATE decision inserts the new row and points
+    # the old one here before soft-deleting it, so "what did we believe, and
+    # when did we stop believing it" is answerable. Self-FK SET NULL so the
+    # superseded row survives deletion of its successor.
+    Column(
+        "superseded_by",
+        UUID(as_uuid=False),
+        ForeignKey("user_memory.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+
+    # Usage telemetry, stamped off the critical path. Drives decay: an unused,
+    # unpinned, low-confidence memory is the first thing to expire.
+    Column("last_used_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("use_count", Integer, nullable=False, server_default=text("0")),
+    # "Always remember this" — exempt from decay and from the retrieval token
+    # budget's drop list.
+    Column("pinned", Boolean, nullable=False, server_default=text("false")),
+
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+
+    CheckConstraint("scope IN ('user', 'workspace', 'tenant', 'team')", name="ck_user_memory_scope"),
+    CheckConstraint("scope <> 'team' OR team_id IS NOT NULL", name="ck_user_memory_team_scope_has_team"),
+    CheckConstraint("kind IN ('fact', 'preference', 'correction')", name="ck_user_memory_kind"),
+    CheckConstraint("origin IN ('auto', 'explicit', 'manual')", name="ck_user_memory_origin"),
+    CheckConstraint(
+        "status IN ('candidate', 'active', 'proposed')", name="ck_user_memory_status"
+    ),
+    CheckConstraint("observation_count >= 1", name="ck_user_memory_observation_count"),
+    CheckConstraint(
+        "valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from",
+        name="ck_user_memory_validity_order",
+    ),
+    CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_user_memory_confidence_range"),
+    CheckConstraint("length(content) > 0", name="ck_user_memory_content_not_blank"),
+    # A memory cannot supersede itself — an applier bug would otherwise create a
+    # row that is both live and retired.
+    CheckConstraint("superseded_by IS NULL OR superseded_by <> id", name="ck_user_memory_no_self_supersede"),
+
+    # The hot path: every list/retrieve is
+    # WHERE tenant_id = :t AND user_id = :u AND deleted_at IS NULL.
+    Index(
+        "ix_user_memory_tenant_user",
+        "tenant_id", "user_id",
+        postgresql_where=text("deleted_at IS NULL"),
+    ),
+    # Retrieval only ever wants `active`; the settings tab wants everything.
+    Index(
+        "ix_user_memory_active",
+        "tenant_id", "user_id", "status",
+        postgresql_where=text("deleted_at IS NULL"),
+    ),
+    # Exact-duplicate guard, per user. Partial on deleted_at so re-learning
+    # something the user previously deleted is allowed (they may have deleted it
+    # because it was stale, not because it was wrong forever).
+    Index(
+        "ix_user_memory_dedupe",
+        "tenant_id", "user_id", "content_hash",
+        unique=True,
+        postgresql_where=text("deleted_at IS NULL"),
+    ),
+    # "What did this chat teach us" — provenance drill-down and per-chat purge.
+    Index("ix_user_memory_source_chat", "source_chat_id"),
+)
+
+
+# ---------------------------------------------------------------------------
+# user_memory_settings (NC-519) — per-user opt-in for the memory layer.
+#
+# The platform's FIRST user-preferences table: today the Preferences tab writes
+# localStorage only. Kept deliberately narrow for that reason — this is not a
+# general-purpose user-settings bag, and it should not become one.
+#
+# ``enabled`` defaults TRUE: memory is opt-OUT, not opt-in. The gate that keeps
+# an environment dark is the service-level ``unified_memory_enabled`` flag, which
+# still ships False — so nothing is captured anywhere until an operator turns the
+# feature on for that deployment. Within an enabled deployment, though, every
+# user captures without having to find a settings page first.
+#
+# Note what this means and does not mean: a user who has never opened Settings →
+# Memory has NO ROW here, and the read path resolves that absence to the same
+# defaults, so "never asked" and "opted in" are deliberately indistinguishable.
+# Incognito chats remain excluded regardless.
+#
+# Mirrors the shape of workspace_da_settings: scope column as PK, booleans,
+# timestamps.
+# ---------------------------------------------------------------------------
+user_memory_settings = Table(
+    "user_memory_settings",
+    metadata,
+
+    Column(
+        "user_id",
+        UUID(as_uuid=False),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+
+    # Master switch. TRUE by default — memory is opt-OUT. Turning it off here is
+    # what stops capture and injection for this user; the service-level
+    # ``unified_memory_enabled`` flag is what keeps a whole environment dark.
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    # Per-kind opt-outs, for the user who wants preferences remembered but not
+    # facts about their role. All TRUE so ``enabled`` alone is the only switch a
+    # user has to find.
+    Column("capture_facts", Boolean, nullable=False, server_default=text("true")),
+    Column("capture_preferences", Boolean, nullable=False, server_default=text("true")),
+    Column("capture_corrections", Boolean, nullable=False, server_default=text("true")),
+
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+
 workspace = Table(
     "workspace",
     metadata,
@@ -1072,7 +1336,53 @@ workspace = Table(
         "enabled_pillars",
         ARRAY(PgEnum(PillarEnum, name="pillar")),
         nullable=False,
-        server_default=text("'{}'::pillar[]"),
+        # Agent Studio is on by default (migration e1a5c9d3b7f4); the other
+        # three are still chosen in the onboarding wizard.
+        server_default=text("'{AGENT_STUDIO}'::pillar[]"),
+    ),
+    # NC-500 — presentation, NOT capability. `enabled_pillars` says what
+    # the workspace can do; this says whether the chat page offers the
+    # member a choice about it. True (the default) hides the sidebar
+    # pillar picker and pins chat to Unified, which spans every enabled
+    # pillar anyway — the CXO case, where we configure the pillars and
+    # the executive should never see the plumbing. An admin turns it off
+    # to hand the picker back.
+    Column(
+        "hide_chat_pillars",
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    ),
+    # the workspace's monthly LLM ceiling in USD, and the default
+    # ceiling for one member inside it. NULL means "use the platform default"
+    # (``settings.workspace_monthly_usd_cap``), which is what every existing
+    # workspace gets on upgrade: a cap nobody set is not a cap of zero.
+    # Stored on the workspace rather than in a settings table because there
+    # are exactly two numbers and they are read on the path of every LLM call.
+    Column("monthly_llm_usd_cap", Numeric(10, 2), nullable=True),
+    Column("monthly_llm_usd_cap_per_user", Numeric(10, 2), nullable=True),
+    # The pacing ceiling: what one member may spend in one UTC day. NULL
+    # derives it from the monthly figure (see app.services.llm_spend.derive),
+    # so a workspace that sets nothing still cannot lose its month in a
+    # morning.
+    Column("daily_llm_usd_cap_per_user", Numeric(10, 2), nullable=True),
+    # Share of the monthly cap held back for work no member asked for:
+    # enrichment, scheduled workflows, chat titles. Percent, 0-100. NULL is
+    # the platform default. Without a reserve the member allowances would sum
+    # to the whole cap and background work would be spending money that was
+    # already promised to people.
+    Column("llm_background_reserve_pct", Numeric(5, 2), nullable=True),
+    # Task key -> provider id, the admin's model routing. A task absent here
+    # falls back to the platform's own default for that task, then to the
+    # workspace's active provider. JSONB rather than a table because it is a
+    # handful of keys read alongside the provider config that is being
+    # fetched anyway, and a row per key would mean a repository, a migration
+    # per new task, and a join on the hottest path in the product.
+    Column(
+        "llm_task_lanes",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
     ),
     Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
@@ -1132,11 +1442,79 @@ workspace_member = Table(
     # per-user so a member removed and re-added gets a fresh welcome.
     Column("first_visited_at", TIMESTAMP(timezone=True), nullable=True),
 
+    # this member's own monthly LLM ceiling in USD, raised by an
+    # admin for someone the workspace default does not fit. NULL means the
+    # workspace default applies, so the column is empty for almost everyone
+    # and a grant reads as the exception it is.
+    Column("monthly_llm_usd_cap", Numeric(10, 2), nullable=True),
+    Column("daily_llm_usd_cap", Numeric(10, 2), nullable=True),
+
     UniqueConstraint("workspace_id", "user_id", name="ux_workspace_member_workspace_user"),
     Index("ix_workspace_member_workspace", "workspace_id"),
     Index("ix_workspace_member_user", "user_id"),
     Index("ix_workspace_member_workspace_admin", "workspace_id", "is_workspace_admin"),
 )
+
+# what one workspace spent on LLM calls, per member, per month.
+#
+# ONE table answers both questions the product asks. A member's spend is one
+# row. The workspace's spend is the sum of its rows for that month, which is a
+# few hundred rows at 500 members and is read behind a short Redis cache. A
+# second workspace-level table would be a denormalisation that can disagree
+# with the rows it summarises, and the disagreement would stay invisible until
+# somebody was refused a turn they had not spent.
+#
+# ``user_id`` is NULL for work no person asked for: an enrichment run, a
+# scheduled workflow, a chat title written after the user closed the tab.
+# That cost is real and has to land somewhere visible rather than be dropped
+# because there is nobody to attribute it to.
+#
+# Postgres is the ledger and not Redis, because the cap is the only thing
+# between a runaway loop and the bill, and a cache flush must not reset it.
+# The read is cached; the write never is.
+workspace_llm_spend = Table(
+    "workspace_llm_spend",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    # SET NULL rather than CASCADE: a member who leaves does not erase what
+    # the workspace spent. Their rows survive as unattributed cost.
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    # First day of the calendar month, UTC. A date rather than a month/year
+    # pair, so range queries are ordinary date comparisons.
+    Column("period", Date, nullable=False),
+
+    Column("prompt_tokens", BigInteger, nullable=False, server_default=text("0")),
+    Column("completion_tokens", BigInteger, nullable=False, server_default=text("0")),
+    Column("cached_tokens", BigInteger, nullable=False, server_default=text("0")),
+    Column("llm_calls", BigInteger, nullable=False, server_default=text("0")),
+    # Numeric, never float: this accumulates millions of small additions, and
+    # a float would drift away from the invoice it exists to predict.
+    Column("cost_usd", Numeric(14, 6), nullable=False, server_default=text("0")),
+
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+
+    # The UPSERT target. NULLS NOT DISTINCT so the unattributed row (user_id
+    # IS NULL) stays ONE row per workspace-month: under the default semantics
+    # every NULL is distinct, the conflict clause would never fire, and
+    # background work would insert a fresh row per LLM call.
+    Index(
+        "ux_workspace_llm_spend_period",
+        "workspace_id",
+        "user_id",
+        "period",
+        unique=True,
+        postgresql_nulls_not_distinct=True,
+    ),
+    # The workspace total for a month, and the admin table's ordering.
+    Index("ix_workspace_llm_spend_workspace_period", "workspace_id", "period"),
+    # One member's own usage page, across workspaces.
+    Index("ix_workspace_llm_spend_user_period", "user_id", "period"),
+)
+
 
 workspace_access_request = Table(
     "workspace_access_request",
@@ -1990,6 +2368,144 @@ workspace_curation_da_column = Table(
 
 
 # ---------------------------------------------------------------------------
+# workspace_da_suggested_question — the stored pool of chat starter questions
+# for one workspace (NC-570).
+#
+# Until this table existed, the chat empty state composed its DA cards from
+# three string templates on the request path. The result was honest after
+# NC-567, because nothing reached a sentence without a business name and a
+# statistical profile behind it, but it was still assembled prose. A senior,
+# non technical reader does not recognise "Break down Net revenue by Sales
+# region in Sales orders" as a question they asked. Generation therefore moves
+# into the enrichment run, where a language model writes the sentence against
+# the same evidence, and the result is stored here.
+#
+# One row is one question. The row carries the catalog identity the serve
+# boundary needs, so nothing has to be recovered from the finished sentence:
+#
+#   * da_catalog_table_id / da_catalog_schema_id — where the question comes
+#     from. The permission filter walks column -> table -> schema, so it needs
+#     the schema as well as the table.
+#   * da_catalog_column_ids — every column the sentence names. This is what
+#     makes the NC-568 filter possible: a member denied one column must not
+#     read its business name off a suggested question. NOT NULL, because a
+#     question that records no column cannot be proved safe and the filter
+#     fails closed on an empty list.
+#
+# ``shape`` is load bearing and not decoration. It is the question's kind — a
+# trend, a breakdown, a total, a ranking — and it carries the icon the client
+# renders. The serve boundary groups the pool by shape and draws round the
+# groups in turn, so four cards on one screen are four different kinds of
+# question rather than one sentence repeated four times. Storing the icon
+# alone would work today and lose the grouping the moment two shapes shared an
+# icon, so the kind is stored and the icon is derived from it.
+#
+# ``origin`` matches the ``description_origin`` house style on the
+# workspace_curation_da_* overlays: a short string with a check constraint
+# rather than a native enum, so adding a value later is a constraint change
+# and not a type migration. 'ai' is what the enrichment run writes; 'template'
+# records a row put here by the deterministic composer, which keeps the door
+# open for a workspace that will never run a model.
+#
+# Every foreign key cascades. A removed connection, schema or table takes its
+# questions with it, because a question about a table that no longer exists is
+# exactly the "names something that isn't there" failure this whole feature
+# was written to remove. ``generated_by_run_id`` is the one exception: it is
+# provenance, so a deleted enrichment run leaves the questions in place with a
+# NULL run.
+# ---------------------------------------------------------------------------
+
+workspace_da_suggested_question = Table(
+    "workspace_da_suggested_question",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column(
+        "workspace_id",
+        UUID(as_uuid=False),
+        ForeignKey("workspace.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "tenant_id",
+        UUID(as_uuid=False),
+        ForeignKey("tenant.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    # The DA connection is an ``integration`` row, and the column keeps the DA
+    # domain name the rest of the catalog uses (see da_catalog_schema).
+    Column(
+        "da_connection_id",
+        UUID(as_uuid=False),
+        ForeignKey("integration.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "da_catalog_schema_id",
+        UUID(as_uuid=False),
+        ForeignKey("da_catalog_schema.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "da_catalog_table_id",
+        UUID(as_uuid=False),
+        ForeignKey("da_catalog_table.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    # JSONB list[str] of da_catalog_column.id. A list and not a join table:
+    # the value is read whole, never queried by element, and it is rewritten
+    # with its question rather than edited.
+    Column("da_catalog_column_ids", JSONB, nullable=False),
+
+    Column("question_text", Text, nullable=False),
+    Column("shape", String(32), nullable=False),
+    Column(
+        "origin",
+        String(8),
+        nullable=False,
+        server_default=text("'ai'"),
+    ),
+
+    # Provenance. SET NULL so pruning old runs never deletes the pool.
+    Column(
+        "generated_by_run_id",
+        UUID(as_uuid=False),
+        ForeignKey("da_enrichment_run.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    Column(
+        "generated_at",
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+    Column(
+        "created_at",
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+    Column(
+        "updated_at",
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+
+    CheckConstraint(
+        "origin IN ('template', 'ai')",
+        name="ck_wdsq_origin",
+    ),
+    # The serve path's only lookup: this workspace's pool, narrowed to the
+    # connections it may currently query.
+    Index("ix_wdsq_workspace_connection", "workspace_id", "da_connection_id"),
+    # The write path's lookup: delete then insert per table.
+    Index("ix_wdsq_table", "da_catalog_table_id"),
+)
+
+
+# ---------------------------------------------------------------------------
 # workspace_da_settings — workspace-level DA settings (DA-P1l.1.0).
 #
 # Holds workspace-level toggles that govern AI description generation
@@ -2712,7 +3228,9 @@ dashboard = Table(
             values_callable=lambda enum: [e.value for e in enum],
         ),
         nullable=False,
-        server_default=text("'workspace_members'"),
+        # NC-691: private until shared. Rows created before the change keep
+        # 'workspace_members' (the migration alters only the default).
+        server_default=text("'restricted'"),
     ),
     # Back-pointer to the build chat. 1:1. SET NULL because the chat
     # can be purged independently (compliance) — the dashboard widgets
@@ -2736,6 +3254,10 @@ dashboard = Table(
         ForeignKey("user.id", ondelete="SET NULL"),
         nullable=True,
     ),
+    # Pinned to the top of the sidebar's dashboard list. Mirrors chat.pinned so
+    # both rails sort by the same rule; a user preference about their workspace,
+    # which is why it is a column and not localStorage.
+    Column("pinned", Boolean, nullable=False, server_default=text("false")),
     Column("published_at", TIMESTAMP(timezone=True), nullable=True),
     Column(
         "created_at",
@@ -2797,7 +3319,12 @@ dashboard_widget = Table(
     ),
     Column("title", String(255), nullable=False),
     Column("description", Text, nullable=True),
-    # data_binding: { connection_id, schema_name, sql, params? }
+    # data_binding: relational { connection_id, schema_name, sql, params? }
+    #            or document   { connection_id, database, collection, pipeline }
+    #   A widget re-executes its query on every load. Restricting that query to
+    #   SQL made dashboards a relational-only surface: a chart over a Mongo
+    #   collection could be produced in chat but never kept. Both forms are
+    #   validated by DashboardWidgetDataBinding, which enforces exactly one.
     # viz_spec: { chart_type, x_axis, y_axis, series?, format?, ... }
     # grounding_metadata: { tables[], columns[], curator, last_validated_at }
     # All JSONB so we can partial-update specific keys without
@@ -2808,6 +3335,19 @@ dashboard_widget = Table(
     # The build-chat message that proposed this widget. SET NULL on
     # message purge (compliance) — the widget itself is the ground
     # truth; chat history is the audit trail.
+    # Which chat chart this widget was promoted from (pin-to-dashboard).
+    #   Not derivable from created_by_message_id: native da_chart artifacts are
+    #   persisted before the assistant message is finalized, so
+    #   chat_artifact.message_id is NULL by design — and a message can hold
+    #   several charts, so a message id cannot say WHICH one this came from.
+    #   SET NULL on delete, like created_by_message_id: the widget outlives its
+    #   provenance because the query it runs is its own.
+    Column(
+        "source_artifact_id",
+        UUID(as_uuid=False),
+        ForeignKey("chat_artifact.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
     Column(
         "created_by_message_id",
         UUID(as_uuid=False),
@@ -2830,6 +3370,14 @@ dashboard_widget = Table(
 
     # Canonical render-time query — every dashboard load hits this.
     Index("ix_dashboard_widget_dashboard", "dashboard_id"),
+    # Reverse lookup: "which dashboards hold this chat chart?" — asked by the
+    # chat card on render, so it needs to be an index and not a scan. Partial,
+    # since the column is NULL for every build-agent-proposed widget.
+    Index(
+        "ix_dashboard_widget_source_artifact",
+        "source_artifact_id",
+        postgresql_where=text("source_artifact_id IS NOT NULL"),
+    ),
 )
 
 
@@ -2929,6 +3477,38 @@ dashboard_link_token = Table(
         "dashboard_id",
         postgresql_where=text("revoked_at IS NULL"),
     ),
+)
+
+
+# ---------------------------------------------------------------------------
+# dashboard_share — the members a ``restricted`` dashboard is shared with
+# (NC-691, closes TD-DASH-INTERNAL-SHARE-1).
+#
+# A restricted dashboard is visible to its owner and to exactly these users; a
+# ``workspace_members`` one to every member of its workspace. One row per
+# (dashboard, user); read-only access, since writes stay curate-gated.
+# ---------------------------------------------------------------------------
+dashboard_share = Table(
+    "dashboard_share",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column(
+        "dashboard_id",
+        UUID(as_uuid=False),
+        ForeignKey("dashboard.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "user_id",
+        UUID(as_uuid=False),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("dashboard_id", "user_id", name="ux_dashboard_share_dashboard_user"),
+    # "Which dashboards were shared with me?" — the list filter's EXISTS probe.
+    Index("ix_dashboard_share_user", "user_id"),
 )
 
 # ---------------------------------------------------------------------------
@@ -3282,6 +3862,19 @@ integration_workspace_enablement = Table(
     ),
     # Subset of integration.capabilities granted to this workspace.
     Column("capabilities_enabled", ARRAY(Text), nullable=False),
+    # Audience (NC-637) — who in this workspace may use the placed capabilities.
+    #   'all_members'      every member of the workspace (an explicit deny grant
+    #                      still excludes one)
+    #   'selected_members' only members holding an explicit allow grant
+    # Placement admits the workspace; this narrows it. Text, not a PgEnum, so a
+    # third mode never needs a type migration — the same call
+    # integration_member_grant.capability already makes.
+    Column(
+        "member_access",
+        String(32),
+        nullable=False,
+        server_default=text("'all_members'"),
+    ),
     Column("display_name_override", String(255), nullable=True),
     Column(
         "status",
@@ -3764,4 +4357,461 @@ workflow_trigger = Table(
         unique=True,
         postgresql_where=text("token_hash IS NOT NULL"),
     ),
+)
+
+
+# ===========================================================================
+# Agent Studio (plans/AGENT-STUDIO-PLAN.md) — Agents, Teams, Runs.
+#
+# An Agent is a reusable specialist definition (charter, allowed tools, input
+# and output schema, limits). A Team is the deployable unit: an orchestrator
+# config plus a roster of pinned AgentVersions. A Run executes one TeamVersion
+# on Temporal and dispatches AgentTasks; every AgentTask returns a structured
+# Envelope. All runs share a per-run MinIO workspace, never transcripts.
+#
+# Statuses are String + CHECK (the user_memory rationale): every one of these
+# sets is expected to grow and a CHECK extends in one line where a PgEnum
+# ADD VALUE cannot be rolled back.
+#
+# The whole draft config lives in ``config`` JSONB. Only the fields the
+# database must index, join or constrain are promoted to columns; the shape of
+# ``config`` is owned by neutrino_database.models.studio_schemas.
+# ===========================================================================
+
+STUDIO_RUN_STATUSES = (
+    "planning", "dispatching", "waiting_approval", "paused", "finishing",
+    "completed", "failed", "cancelled",
+)
+STUDIO_TASK_STATUSES = (
+    "pending", "running", "waiting_approval", "completed", "error",
+    "budget_exhausted", "stalled", "schema_invalid", "cancelled", "approval_rejected",
+)
+STUDIO_TRIGGER_KINDS = ("chat", "studio", "api", "schedule", "event", "test")
+STUDIO_APPROVAL_OUTCOMES = ("allowed_once", "rejected", "cancelled", "unavailable")
+
+
+def _in(col: str, values) -> str:
+    return f"{col} IN ({', '.join(repr(v) for v in values)})"
+
+
+studio_agent = Table(
+    "studio_agent",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("description", Text, nullable=True),
+    # Draft config: charter, model, allowed_tools, input_schema, output_schema,
+    # limits, deny_list, memory_enabled, code_exec_enabled. Shape: AgentConfig.
+    Column("config", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # Platform template library (decision 16): a template is an agent owned by
+    # the platform; cloning copies config into the customer's workspace.
+    Column("is_template", Boolean, nullable=False, server_default=text("false")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("length(name) > 0", name="ck_studio_agent_name_not_blank"),
+    Index("ix_studio_agent_workspace", "tenant_id", "workspace_id", postgresql_where=text("deleted_at IS NULL")),
+    Index("ix_studio_agent_name", "workspace_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
+)
+
+
+studio_agent_version = Table(
+    "studio_agent_version",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("agent_id", UUID(as_uuid=False), ForeignKey("studio_agent.id", ondelete="CASCADE"), nullable=False),
+    Column("version", Integer, nullable=False),
+    # Immutable snapshot of studio_agent.config at publish time.
+    Column("config", JSONB, nullable=False),
+    # passed — every saved test case passed; overridden — published anyway,
+    # override_reason says why (decision 15). Recorded, never silent.
+    Column("test_gate_status", String(16), nullable=False),
+    Column("override_reason", Text, nullable=True),
+    Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("agent_id", "version", name="uq_studio_agent_version"),
+    CheckConstraint("version >= 1", name="ck_studio_agent_version_positive"),
+    CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_agent_version_gate"),
+    CheckConstraint(
+        "test_gate_status <> 'overridden' OR override_reason IS NOT NULL",
+        name="ck_studio_agent_version_override_reason",
+    ),
+)
+
+
+studio_team = Table(
+    "studio_team",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("description", Text, nullable=True),
+    # Draft config: orchestrator {model, limits}, guardrails, roster
+    # [{agent_id, agent_version_id, alias}], input_schema, output_schema,
+    # runs_as, approver_ids, notification_targets, approval_policy,
+    # memory_enabled, promoted_outputs. Shape: TeamConfig.
+    Column("config", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # Promoted to a column because the executor, the redaction pipeline and the
+    # promotion path all branch on it without wanting to parse config.
+    Column("sensitive", Boolean, nullable=False, server_default=text("false")),
+    # Workspaces whose members may run the published team (decision 16).
+    Column("published_to", ARRAY(UUID(as_uuid=False)), nullable=False, server_default=text("'{}'::uuid[]")),
+    Column("is_template", Boolean, nullable=False, server_default=text("false")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("length(name) > 0", name="ck_studio_team_name_not_blank"),
+    Index("ix_studio_team_workspace", "tenant_id", "workspace_id", postgresql_where=text("deleted_at IS NULL")),
+    Index("ix_studio_team_name", "workspace_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
+)
+
+
+studio_team_version = Table(
+    "studio_team_version",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("config", JSONB, nullable=False),
+    # [{alias, agent_id, agent_version_id}] — the exact agent snapshots this
+    # team version runs. Runs pin this, so replay is exact (decision 25).
+    Column("roster_pins", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("test_gate_status", String(16), nullable=False),
+    Column("override_reason", Text, nullable=True),
+    Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("team_id", "version", name="uq_studio_team_version"),
+    CheckConstraint("version >= 1", name="ck_studio_team_version_positive"),
+    CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_team_version_gate"),
+    CheckConstraint(
+        "test_gate_status <> 'overridden' OR override_reason IS NOT NULL",
+        name="ck_studio_team_version_override_reason",
+    ),
+)
+
+
+studio_api_key = Table(
+    "studio_api_key",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    # Teams this key may start. Empty means none — a key is never wildcard.
+    Column("team_ids", ARRAY(UUID(as_uuid=False)), nullable=False, server_default=text("'{}'::uuid[]")),
+    # sha256 of the plaintext; the plaintext is shown once at creation and
+    # never stored. ``prefix`` (nsk_ + 8 chars) is what the UI lists.
+    Column("key_hash", String(64), nullable=False, unique=True),
+    Column("prefix", String(16), nullable=False),
+    Column("rate_limit_per_min", Integer, nullable=False, server_default=text("60")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("revoked_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("last_used_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("rate_limit_per_min > 0", name="ck_studio_api_key_rate_positive"),
+    Index("ix_studio_api_key_workspace", "tenant_id", "workspace_id", postgresql_where=text("revoked_at IS NULL")),
+)
+
+
+studio_event_trigger = Table(
+    "studio_event_trigger",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    # poll — a Temporal workflow calls a connector list action on an interval;
+    # webhook — the gateway receiver signals the same workflow (decision 26).
+    Column("source", String(8), nullable=False),
+    # The connector (integration) the poll reads from; NULL for a generic webhook.
+    Column("integration_id", UUID(as_uuid=False), ForeignKey("integration.id", ondelete="SET NULL"), nullable=True),
+    # {action, interval_s, filter, item_key_field, input_mapping,
+    #  webhook_provider, secret_hash}. Never a plaintext secret.
+    Column("config", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("temporal_workflow_id", String(255), nullable=True),
+    # {status, last_poll_at, last_error, consecutive_failures} for the health chip.
+    Column("health", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    CheckConstraint(_in("source", ("poll", "webhook")), name="ck_studio_event_trigger_source"),
+    Index("ix_studio_event_trigger_team", "team_id"),
+)
+
+
+studio_schedule = Table(
+    "studio_schedule",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("cron", String(100), nullable=False),
+    Column("timezone", String(64), nullable=False, server_default=text("'UTC'")),
+    Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("temporal_schedule_id", String(255), nullable=True),
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Index("ix_studio_schedule_team", "team_id"),
+)
+
+
+studio_run = Table(
+    "studio_run",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    # NULL only for a test run of an unpublished draft (the draft config is
+    # frozen into ``team_config`` instead).
+    Column("team_version_id", UUID(as_uuid=False), ForeignKey("studio_team_version.id", ondelete="SET NULL"), nullable=True),
+    # The exact team config this run executed, whether from a version or a
+    # draft test run. Replay reads this, never the live draft.
+    Column("team_config", JSONB, nullable=False),
+    Column("status", String(32), nullable=False, server_default=text("'planning'")),
+    Column("is_test", Boolean, nullable=False, server_default=text("false")),
+    # Trigger attribution (decision 4 / 27). One of the four ids is set.
+    Column("trigger_kind", String(16), nullable=False),
+    Column("trigger_actor_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("api_key_id", UUID(as_uuid=False), ForeignKey("studio_api_key.id", ondelete="SET NULL"), nullable=True),
+    # No FK: studio_trigger_event points back here (run_id) and one side of
+    # the cycle has to be a plain column. The event row is the one that owns
+    # the relationship; this is a convenience pointer for the console.
+    Column("trigger_event_id", UUID(as_uuid=False), nullable=True),
+    # The conversation a chat-triggered run belongs to, so the finished team
+    # output can land as a chat_artifact (which requires a chat_id) and the
+    # card can deep-link. NULL for API, schedule and event runs. SET NULL so a
+    # deleted chat does not destroy the run record.
+    Column("chat_id", UUID(as_uuid=False), ForeignKey("chat.id", ondelete="SET NULL"), nullable=True),
+    Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("output", JSONB, nullable=True),
+    # The orchestrator's current task DAG: [{alias, agent_version_id, brief,
+    # depends_on, task_id}]. Rewritten on every re-plan; history is in run_events.
+    Column("plan", JSONB, nullable=True),
+    Column("workspace_prefix", Text, nullable=False),
+    # Fork lineage (decision 32). SET NULL so a fork survives its parent's purge.
+    Column("parent_run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
+    Column("fork_point_task_id", UUID(as_uuid=False), nullable=True),
+    # {tokens_in, tokens_out, tool_calls, wall_s, usd, sandbox_s} used vs cap.
+    Column("budgets", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("error", Text, nullable=True),
+    Column("temporal_workflow_id", String(255), nullable=True, unique=True),
+    Column("started_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("ended_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    CheckConstraint(_in("status", STUDIO_RUN_STATUSES), name="ck_studio_run_status"),
+    CheckConstraint(_in("trigger_kind", STUDIO_TRIGGER_KINDS), name="ck_studio_run_trigger_kind"),
+    CheckConstraint("parent_run_id IS NULL OR parent_run_id <> id", name="ck_studio_run_no_self_parent"),
+    Index("ix_studio_run_team_created", "tenant_id", "team_id", "created_at"),
+    Index("ix_studio_run_status", "tenant_id", "status"),
+    Index("ix_studio_run_parent", "parent_run_id"),
+)
+
+
+studio_agent_task = Table(
+    "studio_agent_task",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    Column("agent_id", UUID(as_uuid=False), ForeignKey("studio_agent.id", ondelete="SET NULL"), nullable=True),
+    Column("agent_version_id", UUID(as_uuid=False), ForeignKey("studio_agent_version.id", ondelete="SET NULL"), nullable=True),
+    # Frozen agent config for this task (replay-exact even if the version row goes).
+    Column("agent_config", JSONB, nullable=False),
+    Column("alias", String(100), nullable=False),
+    Column("attempt", Integer, nullable=False, server_default=text("1")),
+    # Brief: {objective, context, input, workspace_paths, constraints}.
+    Column("brief", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("status", String(32), nullable=False, server_default=text("'pending'")),
+    # Envelope fields (decision 31). Non-completed never reads as success.
+    Column("exit_reason", Text, nullable=True),
+    Column("output", JSONB, nullable=True),
+    Column("raw_text", Text, nullable=True),
+    Column("schema_errors", JSONB, nullable=True),
+    # <= 4 KB, scrubbed of tool inputs and credentials before it is written.
+    Column("diagnostic", Text, nullable=True),
+    Column("files_written", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("depends_on", ARRAY(UUID(as_uuid=False)), nullable=False, server_default=text("'{}'::uuid[]")),
+    Column("budgets", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("sandbox_id", String(255), nullable=True),
+    Column("temporal_workflow_id", String(255), nullable=True),
+    Column("started_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("ended_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    CheckConstraint(_in("status", STUDIO_TASK_STATUSES), name="ck_studio_agent_task_status"),
+    CheckConstraint("attempt >= 1", name="ck_studio_agent_task_attempt_positive"),
+    CheckConstraint("diagnostic IS NULL OR length(diagnostic) <= 4096", name="ck_studio_agent_task_diagnostic_cap"),
+    Index("ix_studio_agent_task_run_status", "run_id", "status"),
+)
+
+
+studio_approval = Table(
+    "studio_approval",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    # NULL for a mandatory gate the orchestrator raised between tasks.
+    Column("task_id", UUID(as_uuid=False), ForeignKey("studio_agent_task.id", ondelete="CASCADE"), nullable=True),
+    # {integration_id, action, payload, effect, summary} — the exact call that
+    # will be made. ``payload_hash`` is re-checked at execution (decision 29):
+    # a changed payload is refused, not sent.
+    Column("action", JSONB, nullable=False),
+    Column("payload_hash", String(64), nullable=False),
+    Column("approver_ids", ARRAY(UUID(as_uuid=False)), nullable=False, server_default=text("'{}'::uuid[]")),
+    # NULL while pending. Closed, fail-closed set (decision 8).
+    Column("outcome", String(16), nullable=True),
+    Column("decided_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("decided_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
+    # sha256 of the single-use token in the signed email link.
+    Column("token_hash", String(64), nullable=True, unique=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint(
+        f"outcome IS NULL OR {_in('outcome', STUDIO_APPROVAL_OUTCOMES)}",
+        name="ck_studio_approval_outcome",
+    ),
+    CheckConstraint(
+        "outcome IS NULL OR outcome = 'unavailable' OR decided_at IS NOT NULL",
+        name="ck_studio_approval_decided_at",
+    ),
+    Index("ix_studio_approval_pending", "tenant_id", "created_at", postgresql_where=text("outcome IS NULL")),
+    Index("ix_studio_approval_run", "run_id"),
+)
+
+
+studio_trigger_event = Table(
+    "studio_trigger_event",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    Column("trigger_id", UUID(as_uuid=False), ForeignKey("studio_event_trigger.id", ondelete="CASCADE"), nullable=False),
+    Column("source", String(8), nullable=False),
+    # Stable per item (drive item id, message id, issue key). The unique index
+    # below is the dedupe: a second sighting is a no-op insert.
+    Column("item_key", Text, nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("received_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
+    Column("error", Text, nullable=True),
+    CheckConstraint(_in("source", ("poll", "webhook")), name="ck_studio_trigger_event_source"),
+    UniqueConstraint("team_id", "item_key", name="uq_studio_trigger_event_item"),
+    Index("ix_studio_trigger_event_trigger", "trigger_id", "received_at"),
+)
+
+
+studio_test_case = Table(
+    "studio_test_case",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    # Polymorphic subject: an agent or a team. No FK, the service resolves it;
+    # deletion of the subject soft-deletes and the index keeps lookups cheap.
+    Column("subject_kind", String(8), nullable=False),
+    Column("subject_id", UUID(as_uuid=False), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # A case is input + files + assertions: the case OWNS its files, so "Run
+    # all" runs each case with its own and nothing is attached by hand. Same
+    # inbound descriptors a run start takes (app/studio/inbound_files.py):
+    # [{"attachment_id": ...}] or [{"bucket", "key", "filename"}]. They land in
+    # the run workspace at files/<filename>, which is what an input field like
+    # document_path names.
+    Column("files", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    # [{path, op, expected}] evaluated against the output after schema validation.
+    Column("assertions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("last_result", String(16), nullable=False, server_default=text("'never_run'")),
+    Column("last_run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint(_in("subject_kind", ("agent", "team")), name="ck_studio_test_case_subject_kind"),
+    CheckConstraint(_in("last_result", ("passed", "failed", "never_run")), name="ck_studio_test_case_last_result"),
+    Index("ix_studio_test_case_subject", "subject_kind", "subject_id", postgresql_where=text("deleted_at IS NULL")),
+)
+
+
+studio_workspace_file = Table(
+    "studio_workspace_file",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    # Relative to studio_run.workspace_prefix.
+    Column("path", Text, nullable=False),
+    Column("size_bytes", BigInteger, nullable=False, server_default=text("0")),
+    Column("content_type", String(255), nullable=True),
+    Column("writer_task_id", UUID(as_uuid=False), ForeignKey("studio_agent_task.id", ondelete="SET NULL"), nullable=True),
+    # Promotion (decision 11): set when the file became a durable artefact;
+    # ``indexed`` only if the builder also opted it into Knowledge Studio.
+    Column("promoted_artifact_id", UUID(as_uuid=False), ForeignKey("chat_artifact.id", ondelete="SET NULL"), nullable=True),
+    Column("indexed", Boolean, nullable=False, server_default=text("false")),
+    # The ES document id the promotion created. A run started from the Studio
+    # has no chat and so no artefact to hang ``indexed`` off, but it indexes
+    # for real — this is where it says WHAT it indexed. Not an FK: the
+    # document lives in Elasticsearch, not here.
+    Column("indexed_doc_id", Text, nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    UniqueConstraint("run_id", "path", name="uq_studio_workspace_file_path"),
+    CheckConstraint("size_bytes >= 0", name="ck_studio_workspace_file_size"),
+    # ``indexed`` may only be true when the row can say what was indexed.
+    # The artefact is NOT that thing: it is a chat convenience a Studio-only
+    # run never has. The document id is.
+    CheckConstraint("NOT indexed OR indexed_doc_id IS NOT NULL", name="ck_studio_workspace_file_indexed_doc"),
+)
+
+
+# ---------------------------------------------------------------------------
+# studio_run_event — the durable event log a run is replayed from.
+#
+# NOT the legacy ``run_events``: that table's ``run_id`` is String(26) with an
+# FK to the pre-existing ``runs`` table, and a studio run id is a 36-char UUID.
+# Rather than widen a column every other pillar depends on, Agent Studio owns
+# its own log.
+#
+# ``seq`` is the resumable cursor: the SSE endpoint sends it as the event id,
+# a reconnecting client returns it as Last-Event-ID, and replay is
+# ``WHERE run_id = :r AND seq > :last ORDER BY seq``. It is assigned by the
+# writer, not a sequence object, so a batch of events written in one flush
+# keeps the order the agent produced them in.
+#
+# ``payload`` holds exactly what the model or the operator saw: already
+# spilled, already redacted for a sensitive team. The raw payload, when one is
+# kept, lives in the run workspace under ``raw/``, never here.
+# ---------------------------------------------------------------------------
+studio_run_event = Table(
+    "studio_run_event",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="CASCADE"), nullable=False),
+    Column("seq", BigInteger, nullable=False),
+    # Which agent task produced it; NULL for run-level events (status, plan).
+    Column("task_id", UUID(as_uuid=False), ForeignKey("studio_agent_task.id", ondelete="SET NULL"), nullable=True),
+    Column("agent_alias", String(100), nullable=True),
+    Column("type", String(48), nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    CheckConstraint("seq >= 0", name="ck_studio_run_event_seq"),
+    UniqueConstraint("run_id", "seq", name="uq_studio_run_event_seq"),
+    # The only read path: replay from a cursor, in order.
+    Index("ix_studio_run_event_run_seq", "run_id", "seq"),
 )
