@@ -1469,6 +1469,18 @@ class DashboardLinkToken(Base):
     accessed_count: Mapped[int]
     created_at: Mapped[datetime]
 
+
+class DashboardShare(Base):
+    """One member a ``restricted`` dashboard is shared with (NC-691)."""
+
+    __table__ = tables.dashboard_share
+
+    id: Mapped[str]
+    dashboard_id: Mapped[str]
+    user_id: Mapped[str]
+    created_by: Mapped[Optional[str]]
+    created_at: Mapped[datetime]
+
 class DashboardBuildRun(Base):
     """One asynchronous build-agent turn. The POST that starts a turn returns
     this row's id immediately and the agent runs detached, so a dropped

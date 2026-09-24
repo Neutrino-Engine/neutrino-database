@@ -456,15 +456,16 @@ class DashboardStatusEnum(str, Enum):
 
 
 class DashboardVisibilityEnum(str, Enum):
-    """Audience scope for a published dashboard.
+    """Who can see a dashboard (NC-691).
 
-    workspace_members — every member of the workspace can view (default
-                        for published dashboards).
-    restricted        — explicit member / group allowlist via
-                        dashboard_share rows. (v2; the table doesn't
-                        ship in DA-P3.1 — TD-DASH-INTERNAL-SHARE-1.)
-    link_only         — unlisted; only a link-token holder can view.
-                        No workspace-member access by default.
+    restricted        — the owner plus the members listed in
+                        ``dashboard_share``. The default for new
+                        dashboards: nobody else sees one until it is shared.
+    workspace_members — every member of the workspace ("published to the
+                        workspace"). Every dashboard created before NC-691
+                        carries this value, so existing boards keep their
+                        audience.
+    link_only         — never written; read as ``restricted``.
     """
     WORKSPACE_MEMBERS = "workspace_members"
     RESTRICTED = "restricted"
