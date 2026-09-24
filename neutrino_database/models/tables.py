@@ -847,6 +847,31 @@ message = Table(
 )
 
 
+# Thumbs up/down on an assistant reply. One row per (message, user): rating
+# again overwrites. score/comment/expected are the optional detail the
+# thumbs-down dialog collects; a thumbs-up leaves them NULL.
+message_feedback = Table(
+    "message_feedback",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("message_id", UUID(as_uuid=False), ForeignKey("message.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("rating", String(8), nullable=False),
+    Column("score", SmallInteger, nullable=True),
+    Column("comment", Text, nullable=True),
+    Column("expected", Text, nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+
+    UniqueConstraint("message_id", "user_id", name="ux_message_feedback_message_user"),
+    CheckConstraint("rating IN ('up', 'down')", name="ck_message_feedback_rating"),
+    CheckConstraint("score IS NULL OR score BETWEEN 1 AND 5", name="ck_message_feedback_score"),
+    Index("ix_message_feedback_tenant_created", "tenant_id", "created_at"),
+)
+
+
 # NC-137 — ephemeral, conversation-scoped file attachments for Unified
 # Chat (Claude-style upload-and-analyse). DELIBERATELY separate from
 # Enterprise Search ingestion (permanent, indexed, ACL'd via `files`) and
