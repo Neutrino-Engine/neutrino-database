@@ -86,6 +86,13 @@ BuiltinTool = Literal[
 ]
 
 
+class KnowledgeScope(_Strict):
+    """Facet scope for ``knowledge_search`` (TDS Review C4): every search the
+    agent makes is AND-ed with these ``facets.<key>`` terms; a tool-call
+    filter may add keys but never override a scoped one."""
+    facets: dict[str, str | list[str]] = Field(default_factory=dict)
+
+
 class AgentConfig(_Strict):
     charter: str = Field(..., min_length=1)
     model: str = Field(..., min_length=1)
@@ -99,6 +106,8 @@ class AgentConfig(_Strict):
     deny_list: list[str] = Field(default_factory=list)
     memory_enabled: bool = False
     code_exec_enabled: bool = False
+    # Optional default; a run's ``knowledge_scope`` replaces it (C4).
+    knowledge_scope: Optional[KnowledgeScope] = None
 
     @model_validator(mode="after")
     def _output_schema_is_object(self):
@@ -342,7 +351,7 @@ class Envelope(_Strict):
 
 __all__ = [
     "AgentConfig", "ApprovalOutcome", "Brief", "BudgetUsage", "BuiltinTool",
-    "ConnectorAction", "Envelope", "ExecutionMode", "Guardrails", "Limits",
+    "ConnectorAction", "Envelope", "ExecutionMode", "Guardrails", "KnowledgeScope", "Limits",
     "MandatoryGate", "NotificationTarget", "OrchestratorConfig", "Ordering",
     "Plan", "PlanTask", "PromotedOutput", "RosterEntry", "RunStatus", "RunsAs",
     "TaskStatus", "TeamConfig", "ToolError", "ToolErrorCode", "ToolResult",
