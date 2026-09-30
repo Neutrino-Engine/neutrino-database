@@ -25,6 +25,7 @@ class AllowedModuleEnum(str, Enum):
     WEB_SEARCH = "Web Search"
     DEEP_RESEARCH = "Deep Research"
     DASHBOARDS = "Dashboards"
+    AGENT_STUDIO = "Agent Studio"
 
 class UserStatusEnum(str, Enum):
     INVITED = "INVITED"
@@ -160,6 +161,12 @@ class PillarEnum(str, Enum):
     ENTERPRISE_SEARCH = "ENTERPRISE_SEARCH"
     DATA_ANALYTICS = "DATA_ANALYTICS"
     WORKFLOW_EXECUTION = "WORKFLOW_EXECUTION"
+    # Agent Studio (plans/AGENT-STUDIO-PLAN.md). A workspace-level capability
+    # like the other three: the sidebar entry and every studio route key on
+    # it being in ``workspace.enabled_pillars``. ``tenant.allowed_modules``
+    # carries the matching AllowedModuleEnum value, but that column is
+    # inert today, so this is the gate that actually decides.
+    AGENT_STUDIO = "AGENT_STUDIO"
 
 
 class RetrievalStrategyEnum(str, Enum):
@@ -449,15 +456,16 @@ class DashboardStatusEnum(str, Enum):
 
 
 class DashboardVisibilityEnum(str, Enum):
-    """Audience scope for a published dashboard.
+    """Who can see a dashboard (NC-691).
 
-    workspace_members — every member of the workspace can view (default
-                        for published dashboards).
-    restricted        — explicit member / group allowlist via
-                        dashboard_share rows. (v2; the table doesn't
-                        ship in DA-P3.1 — TD-DASH-INTERNAL-SHARE-1.)
-    link_only         — unlisted; only a link-token holder can view.
-                        No workspace-member access by default.
+    restricted        — the owner plus the members listed in
+                        ``dashboard_share``. The default for new
+                        dashboards: nobody else sees one until it is shared.
+    workspace_members — every member of the workspace ("published to the
+                        workspace"). Every dashboard created before NC-691
+                        carries this value, so existing boards keep their
+                        audience.
+    link_only         — never written; read as ``restricted``.
     """
     WORKSPACE_MEMBERS = "workspace_members"
     RESTRICTED = "restricted"
@@ -574,18 +582,6 @@ class ChatKindEnum(str, Enum):
     AD_HOC = "ad_hoc"
     DASHBOARD_BUILD = "dashboard_build"
     WORKFLOW_BUILD = "workflow_build"
-
-
-class EstateScopeKindEnum(str, Enum):
-    """What estate resource a conversation is about (ITOps merge S5).
-
-    A chat with a scope is still an ordinary ad_hoc conversation: the scope is a
-    visible chip and a server-side resolution hint, never a permission and never
-    hidden text prepended to the user's message. Several conversations may share
-    one uid.
-    """
-    HOST = "host"
-    INCIDENT = "incident"
 
 
 class DAAccessResourceTypeEnum(str, Enum):
@@ -895,26 +891,3 @@ class WorkflowTriggerStatusEnum(str, Enum):
     """
     ACTIVE = "active"
     DISABLED = "disabled"
-
-
-class ExecutionProposalStatusEnum(str, Enum):
-    """Where an agent-proposed execution stands (ITOps merge S4, §4.1).
-
-    pending   — recorded, awaiting a human decision. Nothing has run.
-    approved  — a human approved this exact digest; the run may start.
-    rejected  — a human refused it. It never becomes approvable again.
-    cancelled — withdrawn before anyone decided (the requester, or a superseding
-                proposal). Distinct from ``rejected``: nobody said no.
-    expired   — ``expires_at`` passed with no decision. A timeout must never
-                read as an approval, so this is its own terminal value.
-    succeeded — the approved run finished and its postcheck passed.
-    failed    — the approved run finished and its postcheck failed, or the run
-                itself failed. Terminal; the requester proposes again.
-    """
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    CANCELLED = "cancelled"
-    EXPIRED = "expired"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
