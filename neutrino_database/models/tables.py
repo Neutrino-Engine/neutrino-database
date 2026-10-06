@@ -4541,7 +4541,13 @@ studio_event_trigger = Table(
     metadata,
     Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
     Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
-    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    # Exactly one target (TDS Review C6): a Studio team, or a workflow fired
+    # through the gateway under ``runs_as``.
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=True),
+    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=True),
+    # {kind: owner|service, identity_id} — only for a workflow target; a team
+    # target reads runs_as off the team config.
+    Column("runs_as", JSONB, nullable=True),
     Column("name", String(200), nullable=False),
     # poll — a Temporal workflow calls a connector list action on an interval;
     # webhook — the gateway receiver signals the same workflow (decision 26).
@@ -4559,6 +4565,7 @@ studio_event_trigger = Table(
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     CheckConstraint(_in("source", ("poll", "webhook")), name="ck_studio_event_trigger_source"),
+    CheckConstraint("(team_id IS NULL) <> (workflow_id IS NULL)", name="ck_studio_event_trigger_target"),
     Index("ix_studio_event_trigger_team", "team_id"),
 )
 
@@ -4588,7 +4595,10 @@ studio_run = Table(
     Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
     Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
     Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
-    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    # No FK: a single-agent run (``synthetic_team_config`` — agent test runs
+    # and ``POST /studio/agents/{id}/runs``, C5) carries the AGENT id here.
+    # Teams and agents are soft-deleted, so the cascade never fired anyway.
+    Column("team_id", UUID(as_uuid=False), nullable=False),
     # NULL only for a test run of an unpublished draft (the draft config is
     # frozen into ``team_config`` instead).
     Column("team_version_id", UUID(as_uuid=False), ForeignKey("studio_team_version.id", ondelete="SET NULL"), nullable=True),
@@ -4714,7 +4724,8 @@ studio_trigger_event = Table(
     metadata,
     Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
     Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
-    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=False),
+    # NULL for a workflow-target trigger (C6); the dedupe key is the trigger.
+    Column("team_id", UUID(as_uuid=False), ForeignKey("studio_team.id", ondelete="CASCADE"), nullable=True),
     Column("trigger_id", UUID(as_uuid=False), ForeignKey("studio_event_trigger.id", ondelete="CASCADE"), nullable=False),
     Column("source", String(8), nullable=False),
     # Stable per item (drive item id, message id, issue key). The unique index
@@ -4725,7 +4736,7 @@ studio_trigger_event = Table(
     Column("run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
     Column("error", Text, nullable=True),
     CheckConstraint(_in("source", ("poll", "webhook")), name="ck_studio_trigger_event_source"),
-    UniqueConstraint("team_id", "item_key", name="uq_studio_trigger_event_item"),
+    UniqueConstraint("trigger_id", "item_key", name="uq_studio_trigger_event_item"),
     Index("ix_studio_trigger_event_trigger", "trigger_id", "received_at"),
 )
 
