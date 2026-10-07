@@ -3,7 +3,7 @@ model's real window.
 
 The provider form used to save 100000 for every model. A provider still at
 exactly 100000 is moved to its model's window, matching the new form defaults
-(agent-platform ``model_context_window``). Any other value was chosen by an
+(neutrino-frontend-v3 ``config/llm-providers.ts``). Any other value was chosen by an
 admin and is left alone. Each moved row is marked so the downgrade restores
 only those.
 
