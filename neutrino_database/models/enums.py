@@ -510,14 +510,16 @@ class DataBindingKindEnum(str, Enum):
 # ``body_fields`` are the binding fields that make up that route's request body.
 # Here rather than at each caller because the anonymous share-link executor
 # lives in the gateway and the authed fetch lives in the frontend — two repos
-# that would otherwise each hardcode a per-source body and drift. Note it is
-# NOT simply ``required``: a relational binding needs ``schema_name`` to be
-# valid but the execute route does not take it.
+# that would otherwise each hardcode a per-source body and drift. Not the same
+# list as ``required`` in general; for a relational binding they now coincide
+# (NC-730): execute_query takes ``schema_name`` so connector-service resolves
+# the query's unqualified tables against the schema the caller's access is
+# checked in, and runs it under that search_path.
 DATA_BINDING_FORMS: dict[DataBindingKindEnum, dict[str, object]] = {
     DataBindingKindEnum.RELATIONAL: {
         "required": ("schema_name", "sql"),
         "execute_route": "execute_query",
-        "body_fields": ("sql",),
+        "body_fields": ("sql", "schema_name"),
     },
     DataBindingKindEnum.DOCUMENT: {
         "required": ("database", "collection", "pipeline"),

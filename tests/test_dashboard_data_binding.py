@@ -237,12 +237,14 @@ class TestAddingADatasourceIsOneTableEntry:
             unknown = [f for f in spec["body_fields"] if f not in fields]
             assert not unknown, f"{kind.value} body names unknown field(s): {unknown}"
 
-    def test_execute_body_carries_the_query_and_nothing_else(self):
+    def test_execute_body_carries_the_query_and_its_schema(self):
         rel = DashboardWidgetDataBinding(**_relational())
-        assert rel.execute_body == {"sql": _relational()["sql"]}
-        # schema_name is REQUIRED for validity but is not part of the request —
-        # the two lists are deliberately different.
-        assert "schema_name" not in rel.execute_body
+        # NC-730 — schema_name rides along so connector-service resolves
+        # unqualified tables (and its search_path) against the binding's schema.
+        assert rel.execute_body == {
+            "sql": _relational()["sql"],
+            "schema_name": _relational()["schema_name"],
+        }
         assert "connection_id" not in rel.execute_body, (
             "the connection is in the URL, not the body"
         )
