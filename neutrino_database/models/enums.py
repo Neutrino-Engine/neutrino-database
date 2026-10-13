@@ -197,7 +197,10 @@ class ServiceType(str, Enum):
     ANTHROPIC = "anthropic"
     GEMINI = "gemini"
     AZURE_OPENAI = "azure_openai"
+    # NC-727 — Landing AI is off for now; Azure DI is the only document parser.
+    # Kept so a gateway built before NC-727 still imports against this package.
     LANDINGAI = "landingai"
+    AZURE_DI = "azure_di"
     BEDROCK = "bedrock"
     # NC-526 — OpenRouter is an OpenAI-compatible aggregator, but it gets its
     # own service type rather than riding "openai": its model ids are
