@@ -86,6 +86,11 @@ def upgrade() -> None:
         sa.Column("episode_id", UUID, sa.ForeignKey("alert_episode.id", ondelete="SET NULL"), nullable=True),
         sa.Column("decision", sa.String(16), nullable=False),
         sa.Column("at", TS, nullable=False),
+        sa.Column("host", sa.Text, nullable=True),
+        sa.Column("check_type", sa.String(64), nullable=True),
+        sa.Column("scope", sa.Text, nullable=True),
+        sa.Column("severity", sa.SmallInteger, server_default=sa.text("0"), nullable=False),
+        sa.Column("reason", sa.Text, nullable=True),
         sa.Column("created_at", TS, server_default=sa.func.now(), nullable=False),
     )
     op.create_index("ix_alert_occurrence_at", "alert_occurrence", ["workspace_id", "at"])

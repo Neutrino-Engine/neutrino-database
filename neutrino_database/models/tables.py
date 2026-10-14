@@ -4922,6 +4922,12 @@ alert_occurrence = Table(
     Column("episode_id", UUID(as_uuid=False), ForeignKey("alert_episode.id", ondelete="SET NULL"), nullable=True),
     Column("decision", String(16), nullable=False),
     Column("at", TIMESTAMP(timezone=True), nullable=False),
+    # Derived facts for the alert timeline; no alert text is kept.
+    Column("host", Text, nullable=True),
+    Column("check_type", String(64), nullable=True),
+    Column("scope", Text, nullable=True),
+    Column("severity", SmallInteger, nullable=False, server_default=text("0")),
+    Column("reason", Text, nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
 
     # Retention sweep and "what happened to recent alerts".
