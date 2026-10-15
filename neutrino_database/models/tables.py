@@ -4877,6 +4877,16 @@ alert_episode = Table(
     Column("hosts", ARRAY(Text), nullable=False, server_default=text("'{}'")),
     Column("alerts", Integer, nullable=False, server_default=text("0")),
     Column("reopened", Integer, nullable=False, server_default=text("0")),
+    # Tier decision (absorb / enrich / notify / escalate) and its evidence.
+    Column("customer", Text, nullable=True),
+    Column("tier", String(16), nullable=True),
+    Column("tier_reason", Text, nullable=True),
+    Column("score", Float, nullable=True),
+    Column("notified_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("notify_to", Text, nullable=True),
+    # Useful / not useful from the notified person.
+    Column("feedback", String(16), nullable=True),
+    Column("feedback_at", TIMESTAMP(timezone=True), nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
 
