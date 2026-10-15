@@ -4944,6 +4944,35 @@ alert_occurrence = Table(
     Index("ix_alert_occurrence_at", "workspace_id", "at"),
 )
 
+# alert_pattern: per alert signature, how it behaves over the last 30 days and
+# what would fix it at the source. Derived facts from the data lake, refreshed
+# by the patterns job; one row per (workspace, fingerprint), replaced each run.
+alert_pattern = Table(
+    "alert_pattern",
+    metadata,
+
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True),
+    Column("fingerprint", Text, primary_key=True),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("customer", Text, nullable=True),
+    Column("host", Text, nullable=True),
+    Column("check_type", String(64), nullable=True),
+    Column("scope", Text, nullable=True),
+    Column("alerts", Integer, nullable=False),
+    Column("alerts_last_week", Integer, nullable=False, server_default=text("0")),
+    Column("alerts_week_before", Integer, nullable=False, server_default=text("0")),
+    Column("self_recovered_pct", Float, nullable=True),
+    Column("median_minutes", Float, nullable=True),
+    Column("peak_hour", SmallInteger, nullable=True),
+    Column("peak_share", Float, nullable=True),
+    Column("months_active", SmallInteger, nullable=False, server_default=text("1")),
+    Column("action", String(32), nullable=False),
+    Column("recommendation", Text, nullable=False),
+    Column("computed_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    Index("ix_alert_pattern_alerts", "workspace_id", "alerts"),
+)
+
 alert_silence = Table(
     "alert_silence",
     metadata,

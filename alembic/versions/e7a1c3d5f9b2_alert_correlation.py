@@ -104,6 +104,29 @@ def upgrade() -> None:
     op.create_index("ix_alert_occurrence_at", "alert_occurrence", ["workspace_id", "at"])
 
     op.create_table(
+        "alert_pattern",
+        sa.Column("workspace_id", UUID, sa.ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True),
+        sa.Column("fingerprint", sa.Text, primary_key=True),
+        *_scope(),
+        sa.Column("customer", sa.Text, nullable=True),
+        sa.Column("host", sa.Text, nullable=True),
+        sa.Column("check_type", sa.String(64), nullable=True),
+        sa.Column("scope", sa.Text, nullable=True),
+        sa.Column("alerts", sa.Integer, nullable=False),
+        sa.Column("alerts_last_week", sa.Integer, server_default=sa.text("0"), nullable=False),
+        sa.Column("alerts_week_before", sa.Integer, server_default=sa.text("0"), nullable=False),
+        sa.Column("self_recovered_pct", sa.Float, nullable=True),
+        sa.Column("median_minutes", sa.Float, nullable=True),
+        sa.Column("peak_hour", sa.SmallInteger, nullable=True),
+        sa.Column("peak_share", sa.Float, nullable=True),
+        sa.Column("months_active", sa.SmallInteger, server_default=sa.text("1"), nullable=False),
+        sa.Column("action", sa.String(32), nullable=False),
+        sa.Column("recommendation", sa.Text, nullable=False),
+        sa.Column("computed_at", TS, server_default=sa.func.now(), nullable=False),
+    )
+    op.create_index("ix_alert_pattern_alerts", "alert_pattern", ["workspace_id", "alerts"])
+
+    op.create_table(
         "alert_silence",
         sa.Column("id", UUID, primary_key=True),
         *_scope(),
@@ -121,6 +144,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("alert_silence")
+    op.drop_table("alert_pattern")
     op.drop_table("alert_occurrence")
     op.drop_table("alert_fingerprint")
     op.drop_table("alert_episode")
