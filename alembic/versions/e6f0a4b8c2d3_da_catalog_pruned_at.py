@@ -30,9 +30,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Rows tombstoned by a sync have no meaning in the old shape: drop them
-    # before the column that marks them (children cascade).
-    op.execute("DELETE FROM da_catalog_schema WHERE pruned_at IS NOT NULL")
-    op.execute("DELETE FROM da_catalog_table WHERE pruned_at IS NOT NULL")
+    # child-first so foreign keys cannot block.
     op.execute("DELETE FROM da_catalog_column WHERE pruned_at IS NOT NULL")
+    op.execute("DELETE FROM da_catalog_table WHERE pruned_at IS NOT NULL")
+    op.execute("DELETE FROM da_catalog_schema WHERE pruned_at IS NOT NULL")
     for t in reversed(_TABLES):
         op.drop_column(t, "pruned_at")
