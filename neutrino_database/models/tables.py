@@ -1992,6 +1992,9 @@ da_catalog_schema = Table(
         server_default=text("false"),
     ),
     Column("last_synced_at", TIMESTAMP(timezone=True), nullable=True),
+    # NC-739 H5: set when a sync no longer finds the row; the id, flags and
+    # grants survive so a rediscovery restores them. Readers filter IS NULL.
+    Column("pruned_at", TIMESTAMP(timezone=True), nullable=True),
     Column(
         "created_at",
         TIMESTAMP(timezone=True),
@@ -2056,6 +2059,7 @@ da_catalog_table = Table(
         server_default=text("false"),
     ),
     Column("last_synced_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("pruned_at", TIMESTAMP(timezone=True), nullable=True),
     Column(
         "created_at",
         TIMESTAMP(timezone=True),
@@ -2154,6 +2158,7 @@ da_catalog_column = Table(
     ),
 
     Column("last_synced_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("pruned_at", TIMESTAMP(timezone=True), nullable=True),
     Column(
         "created_at",
         TIMESTAMP(timezone=True),

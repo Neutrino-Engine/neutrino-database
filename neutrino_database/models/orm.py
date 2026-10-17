@@ -1036,6 +1036,7 @@ class DACatalogSchema(Base):
     is_pii: Mapped[bool]
     is_restricted: Mapped[bool]
     last_synced_at: Mapped[Optional[datetime]]
+    pruned_at: Mapped[Optional[datetime]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 
@@ -1059,6 +1060,7 @@ class DACatalogTable(Base):
     is_pii: Mapped[bool]
     is_restricted: Mapped[bool]
     last_synced_at: Mapped[Optional[datetime]]
+    pruned_at: Mapped[Optional[datetime]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 
@@ -1087,6 +1089,7 @@ class DACatalogColumn(Base):
     is_pii: Mapped[bool]
     is_restricted: Mapped[bool]
     last_synced_at: Mapped[Optional[datetime]]
+    pruned_at: Mapped[Optional[datetime]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 

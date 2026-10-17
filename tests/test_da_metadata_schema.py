@@ -998,3 +998,16 @@ class TestDescriptionVersionTable:
             "Expected unique (scope, parent_id, version_number) on "
             f"description_version; got {indexes!r}"
         )
+
+
+class TestCatalogPrunedAt:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "table_name",
+        ["da_catalog_schema", "da_catalog_table", "da_catalog_column"],
+    )
+    async def test_pruned_at_is_nullable_timestamp(self, test_engine, table_name):
+        """NC-739 H5: sync tombstones rows instead of deleting them."""
+        col = (await _columns(test_engine, table_name))["pruned_at"]
+        assert col["nullable"] is True
+        assert "TIMESTAMP" in str(col["type"]).upper()
