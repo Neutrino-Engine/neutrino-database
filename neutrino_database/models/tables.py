@@ -4847,3 +4847,152 @@ studio_run_event = Table(
     # The only read path: replay from a cursor, in order.
     Index("ix_studio_run_event_run_seq", "run_id", "seq"),
 )
+
+
+# ---------------------------------------------------------------------------
+# Alert correlation (agent-platform app/services/alert_correlation).
+#
+# Alertmanager-style dedup and grouping state for monitoring alerts from any
+# source (Zabbix, ServiceOps, Alertmanager, Datadog, Splunk). Derived facts
+# only: ids, labels, timestamps and counts. No alert subject, body or message
+# is stored here; the source keeps those and Neutrino reads them on demand.
+#
+# alert_episode      a group of related alerts (group_by + group_interval)
+# alert_fingerprint  the live state of one check on one target
+# alert_occurrence   a source's occurrence id -> fingerprint and episode, so a
+#                    recovery that names only its occurrence can be paired
+# alert_silence      matchers + a window during which alerts are silenced
+# ---------------------------------------------------------------------------
+alert_episode = Table(
+    "alert_episode",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    # The group_by label values, joined; the lookup key for "is there an episode to join".
+    Column("group_key", Text, nullable=False),
+    Column("status", String(16), nullable=False, server_default=text("'open'")),
+    Column("opened_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("last_event_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("closed_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("severity", SmallInteger, nullable=False, server_default=text("0")),
+    Column("fingerprints", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    Column("firing", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    Column("hosts", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    Column("alerts", Integer, nullable=False, server_default=text("0")),
+    Column("reopened", Integer, nullable=False, server_default=text("0")),
+    # Tier decision (absorb / enrich / notify / escalate) and its evidence.
+    Column("customer", Text, nullable=True),
+    Column("tier", String(16), nullable=True),
+    Column("tier_reason", Text, nullable=True),
+    Column("score", Float, nullable=True),
+    Column("notified_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("notify_to", Text, nullable=True),
+    # Useful / not useful from the notified person.
+    Column("feedback", String(16), nullable=True),
+    Column("feedback_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    CheckConstraint("status IN ('open', 'resolved')", name="ck_alert_episode_status"),
+    Index("ix_alert_episode_group", "workspace_id", "group_key", text("last_event_at DESC")),
+    Index("ix_alert_episode_status", "workspace_id", "status", text("last_event_at DESC")),
+)
+
+alert_fingerprint = Table(
+    "alert_fingerprint",
+    metadata,
+
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True),
+    Column("fingerprint", Text, primary_key=True),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("since", TIMESTAMP(timezone=True), nullable=True),
+    Column("last_seen", TIMESTAMP(timezone=True), nullable=True),
+    Column("episode_id", UUID(as_uuid=False), ForeignKey("alert_episode.id", ondelete="SET NULL"), nullable=True),
+    # Denormalised from open_event for the inhibition lookup (firing alerts on a host).
+    Column("host", Text, nullable=True),
+    # The occurrence that opened the alert: source, external_id, labels, severity. No free text.
+    Column("open_event", JSONB, nullable=True),
+    # Status-change timestamps inside the flap window.
+    Column("changes", ARRAY(TIMESTAMP(timezone=True)), nullable=False, server_default=text("'{}'")),
+    Column("flapping", Boolean, nullable=False, server_default=text("false")),
+    Column("fired", Integer, nullable=False, server_default=text("0")),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    CheckConstraint("status IN ('firing', 'resolved')", name="ck_alert_fingerprint_status"),
+    Index("ix_alert_fingerprint_firing_host", "workspace_id", "host", postgresql_where=text("status = 'firing'")),
+)
+
+alert_occurrence = Table(
+    "alert_occurrence",
+    metadata,
+
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True),
+    Column("source", String(32), primary_key=True),
+    Column("external_id", Text, primary_key=True),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("fingerprint", Text, nullable=False),
+    Column("episode_id", UUID(as_uuid=False), ForeignKey("alert_episode.id", ondelete="SET NULL"), nullable=True),
+    Column("decision", String(16), nullable=False),
+    Column("at", TIMESTAMP(timezone=True), nullable=False),
+    # Derived facts for the alert timeline; no alert text is kept.
+    Column("host", Text, nullable=True),
+    Column("check_type", String(64), nullable=True),
+    Column("scope", Text, nullable=True),
+    Column("severity", SmallInteger, nullable=False, server_default=text("0")),
+    Column("reason", Text, nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    # Retention sweep and "what happened to recent alerts".
+    Index("ix_alert_occurrence_at", "workspace_id", "at"),
+)
+
+# alert_pattern: per alert signature, how it behaves over the last 30 days and
+# what would fix it at the source. Derived facts from the data lake, refreshed
+# by the patterns job; one row per (workspace, fingerprint), replaced each run.
+alert_pattern = Table(
+    "alert_pattern",
+    metadata,
+
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True),
+    Column("fingerprint", Text, primary_key=True),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("customer", Text, nullable=True),
+    Column("host", Text, nullable=True),
+    Column("check_type", String(64), nullable=True),
+    Column("scope", Text, nullable=True),
+    Column("alerts", Integer, nullable=False),
+    Column("alerts_last_week", Integer, nullable=False, server_default=text("0")),
+    Column("alerts_week_before", Integer, nullable=False, server_default=text("0")),
+    Column("self_recovered_pct", Float, nullable=True),
+    Column("median_minutes", Float, nullable=True),
+    Column("peak_hour", SmallInteger, nullable=True),
+    Column("peak_share", Float, nullable=True),
+    Column("months_active", SmallInteger, nullable=False, server_default=text("1")),
+    Column("action", String(32), nullable=False),
+    Column("recommendation", Text, nullable=False),
+    Column("computed_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    Index("ix_alert_pattern_alerts", "workspace_id", "alerts"),
+)
+
+alert_silence = Table(
+    "alert_silence",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    # {"host": "10.0.0.1", "check": "!uptime"}: equality, "!" negates.
+    Column("matchers", JSONB, nullable=False),
+    Column("starts_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("ends_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("comment", Text, nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    CheckConstraint("ends_at > starts_at", name="ck_alert_silence_window"),
+    Index("ix_alert_silence_active", "workspace_id", "ends_at"),
+)
