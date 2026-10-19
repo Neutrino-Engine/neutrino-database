@@ -4236,6 +4236,15 @@ workflow_run = Table(
     Column("temporal_run_id", Text, nullable=True),
     Column("trigger_payload", JSONB, nullable=True),
     Column("error_message", Text, nullable=True),
+    # NC-760: the node that broke a failed run (what "Retry from failed step" restarts at), and on a
+    # retry, the run it retries. SET NULL keeps a retry's history if the original is deleted.
+    Column("failed_step_id", Text, nullable=True),
+    Column(
+        "retry_of",
+        UUID(as_uuid=False),
+        ForeignKey("workflow_run.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
 
     # created = when triggered; started = when execution began; finished = end.
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
