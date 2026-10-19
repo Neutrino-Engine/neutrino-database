@@ -5001,7 +5001,8 @@ alert_silence = Table(
 # Runbook Studio (agent-platform app/services/runbooks).
 #
 # The remote-exec diagnostic scripts, versioned by the sha256 of their exact
-# bytes, with a two-person approval. Global: one script set for all tenants.
+# bytes. The person who starts a draft owns it; a different admin approves it.
+# Global: one script set for all tenants.
 #
 # runbook          one manifest key (linux/cpu, wrapper/linux_b64, ...)
 # runbook_version  one file content of a key, its explanation and its status
@@ -5032,10 +5033,12 @@ runbook_version = Table(
     Column("explanation", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("safety_declared", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("status", String(16), nullable=False, server_default=text("'draft'")),
-    # The person who submitted it for review; cleared on return to draft.
+    # The owner: the person who started the draft. NULL = seeded from the repository.
     Column("author_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("reason", Text, nullable=True),
-    # User ids that changed the explanation or the declared safety facts.
+    # Set when a reviewer rejects the version back to draft.
+    Column("review_note", Text, nullable=True),
+    # Unused.
     Column("edited_by", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("submitted_at", TIMESTAMP(timezone=True), nullable=True),
@@ -5046,7 +5049,6 @@ runbook_version = Table(
     CheckConstraint("status IN ('draft', 'in_review', 'approved', 'retired')", name="ck_runbook_version_status"),
     CheckConstraint("approved_by IS NULL OR approved_by <> author_user_id", name="ck_runbook_version_two_person"),
     UniqueConstraint("runbook_id", "version", name="uq_runbook_version_version"),
-    UniqueConstraint("runbook_id", "sha256", name="uq_runbook_version_sha256"),
     Index("ux_runbook_version_approved", "runbook_id", unique=True, postgresql_where=text("status = 'approved'")),
     Index("ix_runbook_version_sha256", "sha256"),
 )

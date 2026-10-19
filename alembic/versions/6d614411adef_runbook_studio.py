@@ -1,7 +1,7 @@
 """Runbook Studio: runbook and runbook_version.
 
-The remote-exec diagnostic scripts, versioned by sha256, with a two-person
-approval. Global tables: no tenant_id.
+The remote-exec diagnostic scripts, versioned by sha256. The draft owner never
+approves their own version. Global tables: no tenant_id.
 
 Revision ID: 6d614411adef
 Revises: dbe0ad323d81
@@ -48,6 +48,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(16), nullable=False, server_default=sa.text("'draft'")),
         sa.Column("author_user_id", UUID, sa.ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
         sa.Column("reason", sa.Text, nullable=True),
+        sa.Column("review_note", sa.Text, nullable=True),
         sa.Column("edited_by", postgresql.JSONB, nullable=False, server_default=sa.text("'[]'::jsonb")),
         sa.Column("created_at", TS, server_default=sa.func.now(), nullable=False),
         sa.Column("submitted_at", TS, nullable=True),
@@ -57,7 +58,6 @@ def upgrade() -> None:
         sa.CheckConstraint("status IN ('draft', 'in_review', 'approved', 'retired')", name="ck_runbook_version_status"),
         sa.CheckConstraint("approved_by IS NULL OR approved_by <> author_user_id", name="ck_runbook_version_two_person"),
         sa.UniqueConstraint("runbook_id", "version", name="uq_runbook_version_version"),
-        sa.UniqueConstraint("runbook_id", "sha256", name="uq_runbook_version_sha256"),
     )
     op.create_index("ux_runbook_version_approved", "runbook_version", ["runbook_id"],
                     unique=True, postgresql_where=sa.text("status = 'approved'"))
