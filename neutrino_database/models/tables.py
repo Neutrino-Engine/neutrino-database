@@ -1400,6 +1400,11 @@ workspace = Table(
         nullable=False,
         server_default=text("'{}'::jsonb"),
     ),
+    # ADLC WS2 — who unattended runs act as when a config says
+    # ``runs_as: owner`` / ``service`` with no user id. Configs carry the ROLE;
+    # each environment binds the person, so no user id travels in a package.
+    Column("automation_owner_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("service_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
@@ -4461,6 +4466,36 @@ STUDIO_APPROVAL_OUTCOMES = ("allowed_once", "rejected", "cancelled", "unavailabl
 
 def _in(col: str, values) -> str:
     return f"{col} IN ({', '.join(repr(v) for v in values)})"
+
+
+# ADLC WS2 — named, workspace-scoped sets of people (D24). Approvals, gates,
+# workflow approval/form nodes and notification targets reference
+# ``group:<key>``; the members are resolved when the request is raised.
+approver_group = Table(
+    "approver_group",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("key", String(64), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("description", Text, nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    UniqueConstraint("workspace_id", "key", name="uq_approver_group_key"),
+    CheckConstraint("key ~ '^[a-z][a-z0-9-]{0,63}$'", name="ck_approver_group_key"),
+)
+
+
+approver_group_member = Table(
+    "approver_group_member",
+    metadata,
+    Column("group_id", UUID(as_uuid=False), ForeignKey("approver_group.id", ondelete="CASCADE"), primary_key=True),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), primary_key=True),
+    Column("added_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("added_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+)
 
 
 studio_agent = Table(
