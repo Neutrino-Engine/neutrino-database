@@ -4146,8 +4146,20 @@ workflow = Table(
     Column("name", String(255), nullable=False),
     Column("description", Text, nullable=True),
 
-    # The node/edge definition the GenericGraphWorkflow interprets.
+    # The node/edge definition the GenericGraphWorkflow interprets. This is
+    # the DRAFT: real runs execute ``active_version_id``'s frozen graph (ADLC).
     Column("graph", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # ADLC WS1 — the published version every real run executes. NULL = never
+    # published. Rollback moves this pointer.
+    Column(
+        "active_version_id",
+        UUID(as_uuid=False),
+        ForeignKey("workflow_version.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_workflow_active_version"),
+        nullable=True,
+    ),
+    # Stable identity across environments (export/import keeps it).
+    Column("lineage_id", UUID(as_uuid=False), nullable=False, server_default=text("gen_random_uuid()")),
 
     Column(
         "status",
@@ -4174,6 +4186,28 @@ workflow = Table(
 )
 
 
+# ADLC WS1 — an immutable published snapshot of ``workflow.graph``. Run-team
+# and run-agent nodes carry the exact dependency version they were published
+# against (``props.team_version_id`` / ``props.agent_version_id``).
+workflow_version = Table(
+    "workflow_version",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("graph", JSONB, nullable=False),
+    # sha256 of the canonical JSON graph; equal hash = same version.
+    Column("content_hash", String(64), nullable=False),
+    Column("change_note", Text, nullable=True),
+    Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("workflow_id", "version", name="uq_workflow_version"),
+    CheckConstraint("version >= 1", name="ck_workflow_version_positive"),
+)
+
+
 # ---------------------------------------------------------------------------
 # Workflow Execution pillar (WF-M1) — the run record.
 #
@@ -4196,8 +4230,13 @@ workflow_run = Table(
     Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
     Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
 
-    # workflow_version_id stays a bare UUID until M6 adds workflow_version.
-    Column("workflow_version_id", UUID(as_uuid=False), nullable=True),
+    # The version this run executed; NULL = a draft (editor) run.
+    Column(
+        "workflow_version_id",
+        UUID(as_uuid=False),
+        ForeignKey("workflow_version.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
     # trigger_id now references workflow_trigger (M3a.2). SET NULL — deleting a
     # trigger keeps the run history, just unlinks it.
     Column(
@@ -4442,6 +4481,15 @@ studio_agent = Table(
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    # ADLC WS1 — the version real runs execute; rollback moves it.
+    Column(
+        "active_version_id",
+        UUID(as_uuid=False),
+        ForeignKey("studio_agent_version.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_studio_agent_active_version"),
+        nullable=True,
+    ),
+    Column("lineage_id", UUID(as_uuid=False), nullable=False, server_default=text("gen_random_uuid()")),
     CheckConstraint("length(name) > 0", name="ck_studio_agent_name_not_blank"),
     Index("ix_studio_agent_workspace", "tenant_id", "workspace_id", postgresql_where=text("deleted_at IS NULL")),
     Index("ix_studio_agent_name", "workspace_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
@@ -4463,6 +4511,8 @@ studio_agent_version = Table(
     Column("override_reason", Text, nullable=True),
     Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("content_hash", String(64), nullable=True),
+    Column("change_note", Text, nullable=True),
     UniqueConstraint("agent_id", "version", name="uq_studio_agent_version"),
     CheckConstraint("version >= 1", name="ck_studio_agent_version_positive"),
     CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_agent_version_gate"),
@@ -4496,6 +4546,15 @@ studio_team = Table(
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    # ADLC WS1 — the version real runs execute; rollback moves it.
+    Column(
+        "active_version_id",
+        UUID(as_uuid=False),
+        ForeignKey("studio_team_version.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_studio_team_active_version"),
+        nullable=True,
+    ),
+    Column("lineage_id", UUID(as_uuid=False), nullable=False, server_default=text("gen_random_uuid()")),
     CheckConstraint("length(name) > 0", name="ck_studio_team_name_not_blank"),
     Index("ix_studio_team_workspace", "tenant_id", "workspace_id", postgresql_where=text("deleted_at IS NULL")),
     Index("ix_studio_team_name", "workspace_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
@@ -4517,6 +4576,8 @@ studio_team_version = Table(
     Column("override_reason", Text, nullable=True),
     Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("content_hash", String(64), nullable=True),
+    Column("change_note", Text, nullable=True),
     UniqueConstraint("team_id", "version", name="uq_studio_team_version"),
     CheckConstraint("version >= 1", name="ck_studio_team_version_positive"),
     CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_team_version_gate"),
