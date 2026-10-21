@@ -30,8 +30,8 @@ import sqlalchemy as sa
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from neutrino_database.models.enums import TenantStatusEnum
-from neutrino_database.models.orm import AuditLog, Tenant
+from neutrino_database.models.enums import TenantStatusEnum, UserStatusEnum
+from neutrino_database.models.orm import AuditLog, Tenant, User
 
 
 def _unique() -> str:
@@ -353,6 +353,60 @@ class TestAuditLogImmutability:
             assert sqlstate == "AU001", (
                 f"DELETE on audit_log must raise SQLSTATE AU001; got {sqlstate!r}"
             )
+        finally:
+            await _drop_tenant(SessionMaker, tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_hard_deleting_the_actor_nulls_actor_user_id(self, test_engine):
+        """The FK's ON DELETE SET NULL is the one UPDATE the trigger allows;
+        before entry 93 it raised AU001 and no actor could ever be deleted."""
+        SessionMaker = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+        tenant_id = await _seed_tenant(SessionMaker)
+        try:
+            user_id, row_id = str(uuid.uuid4()), str(uuid.uuid4())
+            async with SessionMaker() as session:
+                async with session.begin():
+                    session.add(
+                        User(
+                            id=user_id,
+                            tenant_id=tenant_id,
+                            email=f"actor-{_unique()}@example.com",
+                            status=UserStatusEnum.ACTIVE,
+                            created_at=datetime.now(UTC),
+                            updated_at=datetime.now(UTC),
+                        )
+                    )
+                    await session.flush()
+                    session.add(
+                        AuditLog(
+                            id=row_id,
+                            tenant_id=tenant_id,
+                            actor_user_id=user_id,
+                            event_type="test.event",
+                            resource_type="test",
+                            resource_id="r1",
+                        )
+                    )
+
+            async with SessionMaker() as session:
+                async with session.begin():
+                    await session.execute(sa.delete(User).where(User.id == user_id))
+
+            async with SessionMaker() as session:
+                row = await session.get(AuditLog, row_id)
+            assert row.actor_user_id is None
+            assert row.event_type == "test.event"
+
+            # Clearing the actor together with any other column is still blocked.
+            with pytest.raises(DBAPIError) as excinfo:
+                async with SessionMaker() as session:
+                    async with session.begin():
+                        await session.execute(
+                            sa.update(AuditLog)
+                            .where(AuditLog.id == row_id)
+                            .values(event_type="tampered")
+                        )
+            assert getattr(excinfo.value.orig, "sqlstate", None) == "AU001"
         finally:
             await _drop_tenant(SessionMaker, tenant_id)
 

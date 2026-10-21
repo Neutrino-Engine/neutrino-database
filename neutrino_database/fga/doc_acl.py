@@ -30,7 +30,7 @@ from neutrino_database.models.tables import workspace_authz_store
 # Stores whose model this process has already confirmed at-head (NC-113-a).
 # The model is fixed per-process, so once verified we skip the read+hash on
 # later accesses. Reset on restart so a new deploy re-checks.
-_HEALED_STORES: set[str] = set()
+_HEALED_STORES: dict[str, str] = {}  # store_id -> model id this process healed to
 
 # The relations that can carry tuples on a ``doc`` object. Both must be
 # swept on delete: ``can_access`` holds legacy direct grants plus the
@@ -314,19 +314,31 @@ class DocAclService:
                 # already have a row with store_id NULL, which has to be
                 # filled rather than collided with. A row with a real store_id
                 # cannot reach here — the double-checked read returned it.
-                await session.execute(
-                    insert(workspace_authz_store)
-                    .values(
-                        workspace_id=workspace_id,
-                        store_id=store_id,
-                        model_id=model_id,
+                try:
+                    await session.execute(
+                        insert(workspace_authz_store)
+                        .values(
+                            workspace_id=workspace_id,
+                            store_id=store_id,
+                            model_id=model_id,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=["workspace_id"],
+                            set_={"store_id": store_id, "model_id": model_id},
+                        )
                     )
-                    .on_conflict_do_update(
-                        index_elements=["workspace_id"],
-                        set_={"store_id": store_id, "model_id": model_id},
+                    await session.commit()
+                except Exception as e:
+                    # E.g. the workspace was hard-deleted mid-bootstrap (FK).
+                    # Without a registry row nothing would ever find this
+                    # store again, so delete it rather than leak it.
+                    self.logger.error(
+                        f"Registering OpenFGA store {store_id} for workspace "
+                        f"{workspace_id} failed: {e}"
                     )
-                )
-                await session.commit()
+                    await session.rollback()
+                    await self._delete_store(store_id)
+                    return None
 
         # Outside the session on purpose. The heal opens a session of its own,
         # and taking a second pooled connection while other callers sit queued
@@ -406,7 +418,9 @@ class DocAclService:
         to the current id; the deploy migrator is the backstop).
         """
         if store_id in _HEALED_STORES:
-            return model_id
+            # The id this process converged on, not the registry's: another
+            # image version may have pointed the shared row elsewhere since.
+            return _HEALED_STORES[store_id]
         try:
             deployed = await self._get_latest_model(store_id)
             if deployed is not None and model_hash(deployed) == SOURCE_MODEL_HASH:
@@ -422,7 +436,7 @@ class DocAclService:
                         f"model {model_id}; adopted deployed model {deployed_id}"
                     )
                     model_id = deployed_id
-                _HEALED_STORES.add(store_id)
+                _HEALED_STORES[store_id] = model_id
                 return model_id
             new_model_id = await self._create_authorization_model(store_id)
             if new_model_id:
@@ -435,7 +449,7 @@ class DocAclService:
                     f"[fga-heal] store {store_id} was on a stale model; "
                     f"wrote canonical model {new_model_id}"
                 )
-                _HEALED_STORES.add(store_id)
+                _HEALED_STORES[store_id] = new_model_id
                 return new_model_id
             return model_id
         except Exception as e:
