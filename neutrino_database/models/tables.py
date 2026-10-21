@@ -1405,6 +1405,11 @@ workspace = Table(
     # each environment binds the person, so no user id travels in a package.
     Column("automation_owner_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("service_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    # ADLC WS3 (D13/D22) — a protected workspace is import-only: no in-place
+    # edits, changes arrive as packages and land inactive. Activation there
+    # needs a second person unless the admin switches that off (audited).
+    Column("protected", Boolean, nullable=False, server_default=text("false")),
+    Column("two_person_activation", Boolean, nullable=False, server_default=text("true")),
     Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
@@ -4208,6 +4213,9 @@ workflow_version = Table(
     Column("change_note", Text, nullable=True),
     Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    # ADLC WS3 — set when this version arrived in a package (provenance +
+    # the two-person rule's "importer" and "source author").
+    Column("import_id", UUID(as_uuid=False), ForeignKey("package_import.id", ondelete="SET NULL"), nullable=True),
     UniqueConstraint("workflow_id", "version", name="uq_workflow_version"),
     CheckConstraint("version >= 1", name="ck_workflow_version_positive"),
 )
@@ -4498,6 +4506,62 @@ approver_group_member = Table(
 )
 
 
+# ADLC WS3 — packages. A package is a signed JSON bundle of a root object
+# (workflow | team | agent) and every dependency, with environment-specific
+# ids replaced by logical refs. These tables record trust and provenance.
+
+# D12/D34: one-click forward promotion inside a tenant (Dev -> UAT -> Live).
+promotion_path = Table(
+    "promotion_path",
+    metadata,
+    Column("source_workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True),
+    Column("target_workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("updated_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint("source_workspace_id <> target_workspace_id", name="ck_promotion_path_distinct"),
+)
+
+
+# D20: public keys whose bundles this tenant accepts. This deployment's own
+# key is always trusted and is not stored here.
+package_trusted_key = Table(
+    "package_trusted_key",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    # sha256 of the raw public key, hex; what a bundle's signature names.
+    Column("key_id", String(64), nullable=False),
+    Column("public_key", Text, nullable=False),
+    Column("added_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("added_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("tenant_id", "key_id", name="uq_package_trusted_key"),
+)
+
+
+package_import = Table(
+    "package_import",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("bundle_sha256", String(64), nullable=False),
+    # {deployment_id, key_id, tenant_id, workspace_id, workspace_name,
+    #  exported_by_email, exported_at}
+    Column("source", JSONB, nullable=False),
+    # {kind, lineage_id, name, version}
+    Column("root", JSONB, nullable=False),
+    Column("bindings", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # {objects:[{kind, lineage_id, version, target_id, version_id, reused}],
+    #  blocked:[...reasons activation is refused...], warnings:[...]}
+    Column("result", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("imported_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("imported_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Index("ix_package_import_workspace", "workspace_id", "imported_at"),
+)
+
+
 studio_agent = Table(
     "studio_agent",
     metadata,
@@ -4548,6 +4612,9 @@ studio_agent_version = Table(
     Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("content_hash", String(64), nullable=True),
     Column("change_note", Text, nullable=True),
+    # ADLC WS3 — set when this version arrived in a package (provenance +
+    # the two-person rule's "importer" and "source author").
+    Column("import_id", UUID(as_uuid=False), ForeignKey("package_import.id", ondelete="SET NULL"), nullable=True),
     UniqueConstraint("agent_id", "version", name="uq_studio_agent_version"),
     CheckConstraint("version >= 1", name="ck_studio_agent_version_positive"),
     CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_agent_version_gate"),
@@ -4613,6 +4680,9 @@ studio_team_version = Table(
     Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("content_hash", String(64), nullable=True),
     Column("change_note", Text, nullable=True),
+    # ADLC WS3 — set when this version arrived in a package (provenance +
+    # the two-person rule's "importer" and "source author").
+    Column("import_id", UUID(as_uuid=False), ForeignKey("package_import.id", ondelete="SET NULL"), nullable=True),
     UniqueConstraint("team_id", "version", name="uq_studio_team_version"),
     CheckConstraint("version >= 1", name="ck_studio_team_version_positive"),
     CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_team_version_gate"),
@@ -4869,6 +4939,9 @@ studio_test_case = Table(
     # the run workspace at files/<filename>, which is what an input field like
     # document_path names.
     Column("files", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    # ADLC WS3 (D29): the case's files are synthetic, so they may travel in a
+    # package even when the team is sensitive. Real data never leaves.
+    Column("synthetic", Boolean, nullable=False, server_default=text("false")),
     # [{path, op, expected}] evaluated against the output after schema validation.
     Column("assertions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("last_result", String(16), nullable=False, server_default=text("'never_run'")),
