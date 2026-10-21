@@ -19,6 +19,8 @@ Revises: 1e84bef559a6
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Sequence, Union
 
 import sqlalchemy as sa
@@ -29,6 +31,12 @@ revision: str = "a7d1c3e5f9b2"
 down_revision: Union[str, Sequence[str], None] = "1e84bef559a6"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+
+def _canonical_hash(obj) -> str:
+    return hashlib.sha256(
+        json.dumps(obj or {}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def upgrade() -> None:
@@ -81,17 +89,13 @@ def upgrade() -> None:
             ) v
             WHERE v.{kind}_id = s.id
         """)
-        op.execute(f"""
-            UPDATE studio_{kind}_version
-            SET content_hash = encode(sha256(convert_to(config::text, 'UTF8')), 'hex')
-        """)
 
     op.execute("""
         INSERT INTO workflow_version
             (id, tenant_id, workspace_id, workflow_id, version, graph, content_hash,
              change_note, published_by)
         SELECT gen_random_uuid(), w.tenant_id, w.workspace_id, w.id, 1, w.graph,
-               encode(sha256(convert_to(w.graph::text, 'UTF8')), 'hex'),
+               '',
                'Backfilled from the live graph (ADLC WS1)', w.created_by
         FROM workflow w
         WHERE w.status = 'active'
@@ -104,6 +108,20 @@ def upgrade() -> None:
         UPDATE workflow w SET active_version_id = v.id
         FROM workflow_version v WHERE v.workflow_id = w.id
     """)
+
+    # Hashes are computed here, in the app's canonical form, so a backfilled
+    # version and its unchanged draft compare equal (no false "unpublished
+    # changes"). jsonb::text is not that form: key order and spacing differ.
+    conn = op.get_bind()
+    for table, col in (("workflow_version", "graph"),
+                       ("studio_agent_version", "config"),
+                       ("studio_team_version", "config")):
+        rows = conn.execute(sa.text(f"SELECT id, {col} FROM {table}")).fetchall()
+        for row_id, body in rows:
+            conn.execute(
+                sa.text(f"UPDATE {table} SET content_hash = :h WHERE id = :id"),
+                {"h": _canonical_hash(body), "id": row_id},
+            )
 
 
 def downgrade() -> None:
