@@ -4466,7 +4466,8 @@ workflow_trigger = Table(
 # ===========================================================================
 
 STUDIO_RUN_STATUSES = (
-    "planning", "dispatching", "waiting_approval", "paused", "finishing",
+    # queued: waiting for a tenant run slot (ADLC WS5, D41).
+    "queued", "planning", "dispatching", "waiting_approval", "paused", "finishing",
     "completed", "failed", "cancelled",
 )
 STUDIO_TASK_STATUSES = (

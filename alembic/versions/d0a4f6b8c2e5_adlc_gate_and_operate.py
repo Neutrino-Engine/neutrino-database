@@ -4,7 +4,7 @@ WS4:
 - ``studio_gate_run`` holds one test-suite execution, and versions point at the
   run that admitted them (``gate_run_id``).
 - Test cases gain ``trials``, ``judge_rubric``, ``kind`` and ``source_run_id``.
-- ``studio_run.is_shadow`` / ``shadow_of_run_id``.
+- ``studio_run.is_shadow`` / ``shadow_of_run_id``; ``studio_run.status`` gains ``queued``.
 
 WS5:
 - ``run_feedback`` (thumbs + review queue).
@@ -32,6 +32,12 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+_RUN_STATUSES_OLD = ("'planning', 'dispatching', 'waiting_approval', 'paused', 'finishing', "
+                     "'completed', 'failed', 'cancelled'")
+# WS5 (D41): a run waiting for a tenant slot is 'queued'.
+_RUN_STATUSES_NEW = "'queued', " + _RUN_STATUSES_OLD
+
+
 def _uuid(name, fk=None, ondelete=None, nullable=True, **kw):
     args = [sa.ForeignKey(fk, ondelete=ondelete)] if fk else []
     return sa.Column(name, UUID(as_uuid=False), *args, nullable=nullable, **kw)
@@ -42,6 +48,8 @@ def upgrade() -> None:
     op.add_column("tenant", sa.Column("sensitive_retention_days", sa.Integer(), nullable=False, server_default=sa.text("30")))
     op.add_column("tenant", sa.Column("max_concurrent_runs", sa.Integer(), nullable=False, server_default=sa.text("10")))
 
+    op.drop_constraint("ck_studio_run_status", "studio_run", type_="check")
+    op.create_check_constraint("ck_studio_run_status", "studio_run", f"status IN ({_RUN_STATUSES_NEW})")
     op.add_column("studio_run", sa.Column("is_shadow", sa.Boolean(), nullable=False, server_default=sa.text("false")))
     op.add_column("studio_run", _uuid("shadow_of_run_id", "studio_run.id", "SET NULL"))
 
@@ -106,6 +114,9 @@ def downgrade() -> None:
     op.drop_table("studio_gate_run")
     for col in ("source_run_id", "kind", "judge_rubric", "trials"):
         op.drop_column("studio_test_case", col)
+    op.execute("UPDATE studio_run SET status = 'planning' WHERE status = 'queued'")
+    op.drop_constraint("ck_studio_run_status", "studio_run", type_="check")
+    op.create_check_constraint("ck_studio_run_status", "studio_run", f"status IN ({_RUN_STATUSES_OLD})")
     op.drop_column("studio_run", "shadow_of_run_id")
     op.drop_column("studio_run", "is_shadow")
     for col in ("max_concurrent_runs", "sensitive_retention_days", "run_retention_days"):
