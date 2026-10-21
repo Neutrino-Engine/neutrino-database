@@ -505,6 +505,11 @@ tenant = Table(
     # 30 days. Default 50 covers real teams; enterprise raises it via a
     # one-row UPDATE rather than a code change.
     Column("max_workspaces", Integer, nullable=False, server_default=text("50")),
+    # ADLC WS5 (D21) — run data retention; audit + version rows are kept forever.
+    Column("run_retention_days", Integer, nullable=False, server_default=text("180")),
+    Column("sensitive_retention_days", Integer, nullable=False, server_default=text("30")),
+    # ADLC WS5 (D41) — concurrent studio + workflow runs; excess runs queue.
+    Column("max_concurrent_runs", Integer, nullable=False, server_default=text("10")),
     # Owner-controlled domain allowlist for invitations (NEU-X4).
     # Empty array = no restriction (anyone can be invited). Non-empty
     # = invitations rejected unless the invitee's email domain is in
@@ -4562,6 +4567,60 @@ package_import = Table(
 )
 
 
+# ADLC WS4 (D17) — one execution of a subject's test suite. Publish and
+# activation read the result instead of running cases inside the request.
+studio_gate_run = Table(
+    "studio_gate_run",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("subject_kind", String(8), nullable=False),
+    Column("subject_id", UUID(as_uuid=False), nullable=False),
+    # NULL = the draft; else the version under test.
+    Column("version_id", UUID(as_uuid=False), nullable=True),
+    # publish | manual | model_remap | import
+    Column("reason", String(16), nullable=False),
+    Column("status", String(16), nullable=False, server_default=text("'queued'")),
+    # {cases:[{case_id, name, trials:[{run_id, passed, failures:[...], judge:{score, reason}}], passed}],
+    #  passed, total, min_cases_met}
+    Column("results", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("error", Text, nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("finished_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("subject_kind IN ('agent','team')", name="ck_studio_gate_run_subject"),
+    CheckConstraint("status IN ('queued','running','passed','failed','error')", name="ck_studio_gate_run_status"),
+    Index("ix_studio_gate_run_subject", "subject_kind", "subject_id", "created_at"),
+)
+
+
+# ADLC WS5 (D40) — thumbs + comment on any run; thumbs-down and failed runs
+# land in the workspace review queue, whence one click makes a test case.
+run_feedback = Table(
+    "run_feedback",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("run_kind", String(16), nullable=False),
+    Column("run_id", UUID(as_uuid=False), nullable=False),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("rating", String(8), nullable=False),
+    Column("comment", Text, nullable=True),
+    Column("review_status", String(16), nullable=False, server_default=text("'open'")),
+    Column("reviewed_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("reviewed_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("test_case_id", UUID(as_uuid=False), ForeignKey("studio_test_case.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint("run_kind IN ('studio','workflow')", name="ck_run_feedback_kind"),
+    CheckConstraint("rating IN ('up','down')", name="ck_run_feedback_rating"),
+    CheckConstraint("review_status IN ('open','dismissed','converted')", name="ck_run_feedback_review"),
+    UniqueConstraint("run_kind", "run_id", "user_id", name="uq_run_feedback_user"),
+    Index("ix_run_feedback_queue", "workspace_id", "review_status", "created_at"),
+)
+
+
 studio_agent = Table(
     "studio_agent",
     metadata,
@@ -4615,6 +4674,8 @@ studio_agent_version = Table(
     # ADLC WS3 — set when this version arrived in a package (provenance +
     # the two-person rule's "importer" and "source author").
     Column("import_id", UUID(as_uuid=False), ForeignKey("package_import.id", ondelete="SET NULL"), nullable=True),
+    # ADLC WS4 — the gate run that admitted this version.
+    Column("gate_run_id", UUID(as_uuid=False), ForeignKey("studio_gate_run.id", ondelete="SET NULL"), nullable=True),
     UniqueConstraint("agent_id", "version", name="uq_studio_agent_version"),
     CheckConstraint("version >= 1", name="ck_studio_agent_version_positive"),
     CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_agent_version_gate"),
@@ -4683,6 +4744,8 @@ studio_team_version = Table(
     # ADLC WS3 — set when this version arrived in a package (provenance +
     # the two-person rule's "importer" and "source author").
     Column("import_id", UUID(as_uuid=False), ForeignKey("package_import.id", ondelete="SET NULL"), nullable=True),
+    # ADLC WS4 — the gate run that admitted this version.
+    Column("gate_run_id", UUID(as_uuid=False), ForeignKey("studio_gate_run.id", ondelete="SET NULL"), nullable=True),
     UniqueConstraint("team_id", "version", name="uq_studio_team_version"),
     CheckConstraint("version >= 1", name="ck_studio_team_version_positive"),
     CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_team_version_gate"),
@@ -4787,6 +4850,11 @@ studio_run = Table(
     Column("team_config", JSONB, nullable=False),
     Column("status", String(32), nullable=False, server_default=text("'planning'")),
     Column("is_test", Boolean, nullable=False, server_default=text("false")),
+    # ADLC WS4 (D31) — a shadow run executes an inactive version on a real
+    # input with every write stubbed and approvals skipped; ``shadow_of_run_id``
+    # is the live run it is compared against.
+    Column("is_shadow", Boolean, nullable=False, server_default=text("false")),
+    Column("shadow_of_run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
     # Trigger attribution (decision 4 / 27). One of the four ids is set.
     Column("trigger_kind", String(16), nullable=False),
     Column("trigger_actor_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
@@ -4942,6 +5010,13 @@ studio_test_case = Table(
     # ADLC WS3 (D29): the case's files are synthetic, so they may travel in a
     # package even when the team is sensitive. Real data never leaves.
     Column("synthetic", Boolean, nullable=False, server_default=text("false")),
+    # ADLC WS4 (D17/D38) — repeated trials (all must pass), an optional
+    # LLM-judge rubric, and the case's purpose.
+    Column("trials", Integer, nullable=False, server_default=text("1")),
+    Column("judge_rubric", Text, nullable=True),
+    Column("kind", String(16), nullable=False, server_default=text("'regular'")),
+    # The run this case was saved from (D19 "save this run as a test case").
+    Column("source_run_id", UUID(as_uuid=False), nullable=True),
     # [{path, op, expected}] evaluated against the output after schema validation.
     Column("assertions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("last_result", String(16), nullable=False, server_default=text("'never_run'")),
