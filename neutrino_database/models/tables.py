@@ -4248,6 +4248,11 @@ workflow_run = Table(
     Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
     Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
 
+    # ADLC (D31, workflows) — a shadow run executes an inactive version on a
+    # real trigger input with every write stubbed and approvals skipped;
+    # ``shadow_of_run_id`` is the live run it is compared against.
+    Column("is_shadow", Boolean, nullable=False, server_default=text("false")),
+    Column("shadow_of_run_id", UUID(as_uuid=False), ForeignKey("workflow_run.id", ondelete="SET NULL"), nullable=True),
     # The version this run executed; NULL = a draft (editor) run.
     Column(
         "workflow_version_id",
