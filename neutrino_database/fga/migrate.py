@@ -44,16 +44,13 @@ logger = logging.getLogger(__name__)
 class FgaAdminClient(Protocol):
     """The narrow OpenFGA admin surface the migrator needs."""
 
-    async def list_store_ids(self) -> list[str]: ...
+    # (store_id, name) pairs. The name lets the migrator skip stores that
+    # belong to a different model family; see MANAGED_STORE_SUFFIX below.
+    async def list_stores(self) -> list[tuple[str, str]]: ...
 
     async def read_latest_model(self, store_id: str) -> dict[str, Any] | None: ...
 
     async def write_model(self, store_id: str, model: dict[str, Any]) -> str: ...
-
-    # Optional. When present the migrator uses it to skip stores that belong
-    # to a different model family — see MANAGED_STORE_SUFFIX below. Clients
-    # that don't implement it get the legacy unfiltered sweep.
-    async def list_stores(self) -> list[tuple[str, str]]: ...
 
 
 # NC-494 — this migrator owns exactly ONE model family.
@@ -119,29 +116,16 @@ async def migrate_all_stores(client: FgaAdminClient) -> MigrationReport:
     source = load_model()
     report = MigrationReport()
 
-    # Prefer the name-aware listing so foreign stores can be excluded. A
-    # client that only implements list_store_ids() falls back to the legacy
-    # unfiltered behaviour (and logs that it did).
-    lister = getattr(client, "list_stores", None)
-    if callable(lister):
-        named = await lister()
-        store_ids = [sid for sid, name in named if name.endswith(MANAGED_STORE_SUFFIX)]
-        report.not_managed = sorted(
-            sid for sid, name in named if not name.endswith(MANAGED_STORE_SUFFIX)
-        )
-        logger.info(
-            "[fga-migrate] %d/%d stores are managed by this migrator (suffix %r); "
-            "%d left untouched",
-            len(store_ids), len(named), MANAGED_STORE_SUFFIX, len(report.not_managed),
-        )
-    else:
-        store_ids = await client.list_store_ids()
-        logger.warning(
-            "[fga-migrate] client has no list_stores(); sweeping ALL %d stores "
-            "unfiltered. This will write the document-ACL model onto any tenant "
-            "RBAC store present.",
-            len(store_ids),
-        )
+    named = await client.list_stores()
+    store_ids = [sid for sid, name in named if name.endswith(MANAGED_STORE_SUFFIX)]
+    report.not_managed = sorted(
+        sid for sid, name in named if not name.endswith(MANAGED_STORE_SUFFIX)
+    )
+    logger.info(
+        "[fga-migrate] %d/%d stores are managed by this migrator (suffix %r); "
+        "%d left untouched",
+        len(store_ids), len(named), MANAGED_STORE_SUFFIX, len(report.not_managed),
+    )
 
     for store_id in store_ids:
         try:

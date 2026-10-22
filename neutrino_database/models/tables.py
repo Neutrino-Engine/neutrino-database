@@ -1794,6 +1794,13 @@ _AUDIT_LOG_CREATE_FUNCTION = DDL(
     """
     CREATE OR REPLACE FUNCTION audit_log_block_mutation() RETURNS trigger AS $func$
     BEGIN
+        -- The one allowed change: ON DELETE SET NULL clearing actor_user_id
+        -- when the user is hard-deleted, every other column untouched.
+        IF TG_OP = 'UPDATE' AND OLD.actor_user_id IS NOT NULL
+           AND NEW.actor_user_id IS NULL
+           AND (to_jsonb(NEW) - 'actor_user_id') = (to_jsonb(OLD) - 'actor_user_id') THEN
+            RETURN NEW;
+        END IF;
         RAISE EXCEPTION 'audit_log is append-only; UPDATE/DELETE blocked'
             USING ERRCODE = 'AU001';
     END;
@@ -4236,6 +4243,15 @@ workflow_run = Table(
     Column("temporal_run_id", Text, nullable=True),
     Column("trigger_payload", JSONB, nullable=True),
     Column("error_message", Text, nullable=True),
+    # NC-760: the node that broke a failed run (what "Retry from failed step" restarts at), and on a
+    # retry, the run it retries. SET NULL keeps a retry's history if the original is deleted.
+    Column("failed_step_id", Text, nullable=True),
+    Column(
+        "retry_of",
+        UUID(as_uuid=False),
+        ForeignKey("workflow_run.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
 
     # created = when triggered; started = when execution began; finished = end.
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),

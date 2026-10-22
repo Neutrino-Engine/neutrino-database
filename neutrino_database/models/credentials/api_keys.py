@@ -26,7 +26,9 @@ providers = Table(
     Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
     Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
-    UniqueConstraint("workspace_id", "service_type", "display_name", name="ux_llm_provider"),
+    # Partial: a soft-deleted provider must not block re-adding the same one.
+    Index("ux_llm_provider", "workspace_id", "service_type", "display_name",
+          unique=True, postgresql_where=text("is_deleted = false")),
     Index("ix_llm_providers_workspace", "workspace_id"),
     Index("ix_llm_providers_service_active", "service_type", "is_active"),
     Index("ix_llm_providers_workspace_service", "workspace_id", "service_type"),
