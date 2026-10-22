@@ -125,6 +125,7 @@ class Tenant(Base):
     egress_allowed_domains: Mapped[List[str]]
     egress_allowed_email_domains: Mapped[List[str]]
     egress_mode: Mapped[str]
+    llm_allowed_models: Mapped[List[str]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
     deleted_at: Mapped[Optional[datetime]]

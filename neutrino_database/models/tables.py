@@ -534,6 +534,14 @@ tenant = Table(
         server_default=text("'{}'::text[]"),
     ),
     Column("egress_mode", Text, nullable=False, server_default=text("'monitor'")),
+    # LLM model allow-list (NC-795 G-42). Empty = no restriction. Model ids
+    # as the provider names them, '*' globs allowed; matched app-side.
+    Column(
+        "llm_allowed_models",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
