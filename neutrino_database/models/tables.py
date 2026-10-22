@@ -1,7 +1,7 @@
 from sqlalchemy import (
     Date, BigInteger,
     Table, Column, Integer, SmallInteger, String, Text, TIMESTAMP, DateTime, Index, Float, ForeignKey, BigInteger, Enum as PgEnum,
-    UniqueConstraint, Numeric, DDL, event, CheckConstraint
+    UniqueConstraint, Numeric, DDL, event, CheckConstraint, CHAR
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY, INET
 from sqlalchemy.sql import func, text
@@ -1809,6 +1809,13 @@ _AUDIT_LOG_CREATE_FUNCTION = DDL(
     """
     CREATE OR REPLACE FUNCTION audit_log_block_mutation() RETURNS trigger AS $func$
     BEGIN
+        -- The one allowed change: ON DELETE SET NULL clearing actor_user_id
+        -- when the user is hard-deleted, every other column untouched.
+        IF TG_OP = 'UPDATE' AND OLD.actor_user_id IS NOT NULL
+           AND NEW.actor_user_id IS NULL
+           AND (to_jsonb(NEW) - 'actor_user_id') = (to_jsonb(OLD) - 'actor_user_id') THEN
+            RETURN NEW;
+        END IF;
         RAISE EXCEPTION 'audit_log is append-only; UPDATE/DELETE blocked'
             USING ERRCODE = 'AU001';
     END;
@@ -5254,4 +5261,59 @@ alert_silence = Table(
 
     CheckConstraint("ends_at > starts_at", name="ck_alert_silence_window"),
     Index("ix_alert_silence_active", "workspace_id", "ends_at"),
+)
+
+# ---------------------------------------------------------------------------
+# Runbook Studio (agent-platform app/services/runbooks).
+#
+# The remote-exec diagnostic scripts, versioned by the sha256 of their exact
+# bytes. The person who starts a draft owns it; a different admin approves it.
+# Global: one script set for all tenants.
+#
+# runbook          one manifest key (linux/cpu, wrapper/linux_b64, ...)
+# runbook_version  one file content of a key, its explanation and its status
+# ---------------------------------------------------------------------------
+runbook = Table(
+    "runbook",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("key", String(64), nullable=False, unique=True),
+    Column("kind", String(16), nullable=False),
+    Column("target", String(16), nullable=False),
+    Column("check", String(64), nullable=False),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    CheckConstraint("kind IN ('runbook', 'probe', 'wrapper')", name="ck_runbook_kind"),
+)
+
+runbook_version = Table(
+    "runbook_version",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("runbook_id", UUID(as_uuid=False), ForeignKey("runbook.id", ondelete="CASCADE"), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("sha256", CHAR(64), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("explanation", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("safety_declared", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("status", String(16), nullable=False, server_default=text("'draft'")),
+    # The owner: the person who started the draft. NULL = seeded from the repository.
+    Column("author_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("reason", Text, nullable=True),
+    # Set when a reviewer rejects the version back to draft.
+    Column("review_note", Text, nullable=True),
+    # Unused.
+    Column("edited_by", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("submitted_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("approved_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("approved_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("retired_at", TIMESTAMP(timezone=True), nullable=True),
+
+    CheckConstraint("status IN ('draft', 'in_review', 'approved', 'retired')", name="ck_runbook_version_status"),
+    UniqueConstraint("runbook_id", "version", name="uq_runbook_version_version"),
+    Index("ux_runbook_version_approved", "runbook_id", unique=True, postgresql_where=text("status = 'approved'")),
+    Index("ix_runbook_version_sha256", "sha256"),
 )
