@@ -4,7 +4,7 @@ The remote-exec diagnostic scripts, versioned by sha256. The draft owner never
 approves their own version. Global tables: no tenant_id.
 
 Revision ID: 6d614411adef
-Revises: dbe0ad323d81
+Revises: c3f8a1d2e4b5
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "6d614411adef"
-down_revision: Union[str, Sequence[str], None] = "dbe0ad323d81"
+down_revision: Union[str, Sequence[str], None] = "c3f8a1d2e4b5"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
