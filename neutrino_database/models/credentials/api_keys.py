@@ -27,7 +27,10 @@ providers = Table(
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
     Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     # Partial: a soft-deleted provider must not block re-adding the same one.
-    Index("ux_llm_provider", "workspace_id", "service_type", "display_name",
+    # NC-734: unique per category, so an LLM and an embedding provider in the
+    # same workspace may share a service type and display name.
+    Index("ux_provider_category_name", "workspace_id", "provider_category",
+          "service_type", "display_name",
           unique=True, postgresql_where=text("is_deleted = false")),
     Index("ix_llm_providers_workspace", "workspace_id"),
     Index("ix_llm_providers_service_active", "service_type", "is_active"),
