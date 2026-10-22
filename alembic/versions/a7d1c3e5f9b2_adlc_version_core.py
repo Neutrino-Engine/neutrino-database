@@ -14,7 +14,7 @@ Backfill changes no behaviour:
   current graph, which is the graph its triggers ran until today.
 
 Revision ID: a7d1c3e5f9b2
-Revises: 1e84bef559a6
+Revises: 6d614411adef
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision: str = "a7d1c3e5f9b2"
-down_revision: Union[str, Sequence[str], None] = "1e84bef559a6"
+down_revision: Union[str, Sequence[str], None] = "6d614411adef"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
