@@ -1,0 +1,5 @@
+# pip-audit baseline (S7 / G-08). Advisories that already existed on uat when the
+# PR gate landed (2026-10-22). Format: <advisory-id>  # expires <YYYY-MM-DD>  <note>
+# Past its expiry date an entry stops being ignored and the sca job fails again:
+# upgrade the package, or re-justify and push the date out. Never add an entry
+# without an expiry. pip-audit has no severity data, so every advisory is listed.
