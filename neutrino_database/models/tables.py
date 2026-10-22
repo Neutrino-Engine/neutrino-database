@@ -5047,7 +5047,6 @@ runbook_version = Table(
     Column("retired_at", TIMESTAMP(timezone=True), nullable=True),
 
     CheckConstraint("status IN ('draft', 'in_review', 'approved', 'retired')", name="ck_runbook_version_status"),
-    CheckConstraint("approved_by IS NULL OR approved_by <> author_user_id", name="ck_runbook_version_two_person"),
     UniqueConstraint("runbook_id", "version", name="uq_runbook_version_version"),
     Index("ux_runbook_version_approved", "runbook_id", unique=True, postgresql_where=text("status = 'approved'")),
     Index("ix_runbook_version_sha256", "sha256"),

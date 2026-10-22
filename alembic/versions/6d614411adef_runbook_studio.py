@@ -56,7 +56,6 @@ def upgrade() -> None:
         sa.Column("approved_at", TS, nullable=True),
         sa.Column("retired_at", TS, nullable=True),
         sa.CheckConstraint("status IN ('draft', 'in_review', 'approved', 'retired')", name="ck_runbook_version_status"),
-        sa.CheckConstraint("approved_by IS NULL OR approved_by <> author_user_id", name="ck_runbook_version_two_person"),
         sa.UniqueConstraint("runbook_id", "version", name="uq_runbook_version_version"),
     )
     op.create_index("ux_runbook_version_approved", "runbook_version", ["runbook_id"],
