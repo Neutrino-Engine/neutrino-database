@@ -16,7 +16,7 @@ import copy
 import pytest
 
 from neutrino_database.fga import model as fga_model
-from neutrino_database.fga.migrate import migrate_all_stores
+from neutrino_database.fga.migrate import MANAGED_STORE_SUFFIX, migrate_all_stores
 
 
 # A pre-NC-113-a stale model: user + doc/can_access only (the connector-service
@@ -64,8 +64,8 @@ class FakeFgaAdmin:
         self.fail_write = fail_write or set()
         self.writes: list[str] = []
 
-    async def list_store_ids(self) -> list[str]:
-        return list(self.stores)
+    async def list_stores(self) -> list[tuple[str, str]]:
+        return [(sid, f"{sid}{MANAGED_STORE_SUFFIX}") for sid in self.stores]
 
     async def read_latest_model(self, store_id: str) -> dict | None:
         return self.stores.get(store_id)
@@ -189,11 +189,3 @@ async def test_not_managed_stores_are_reported_not_hidden():
     assert report.ok is True
 
 
-@pytest.mark.asyncio
-async def test_legacy_client_without_list_stores_still_works():
-    """Back-compat: a client that only implements list_store_ids() keeps the
-    old unfiltered behaviour rather than silently migrating nothing."""
-    client = FakeFgaAdmin({"s-stale": STALE_MODEL})
-    report = await migrate_all_stores(client)
-    assert report.migrated == ["s-stale"]
-    assert report.not_managed == []

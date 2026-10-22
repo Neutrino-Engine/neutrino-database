@@ -229,3 +229,23 @@ async def test_a_caller_that_cannot_get_the_lock_fails_closed(
 
     # The lock went with the blocker's transaction; nothing is stuck.
     assert await service._get_or_create_store(ws_id) == ("store-1-1", "model-1")
+
+
+async def test_a_failed_registry_insert_deletes_the_new_store(
+    service, sessions, monkeypatch
+):
+    """Entry 105. A workspace with no row (hard-deleted mid-bootstrap) makes
+    the registry insert fail on its foreign key; the store just created in
+    OpenFGA must be deleted, not leaked with nothing pointing at it."""
+    fga = _Fga().install(monkeypatch, service)
+    deleted: list[str] = []
+
+    async def _delete_store(store_id):
+        deleted.append(store_id)
+
+    monkeypatch.setattr(service, "_delete_store", _delete_store)
+    gone = str(uuid.uuid4())
+
+    assert await service._get_or_create_store(gone) is None
+    assert deleted == fga.created == ["store-1-1"]
+    assert await _registry_row(sessions, gone) is None

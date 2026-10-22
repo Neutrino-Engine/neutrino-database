@@ -1,7 +1,7 @@
 """A drift-heal that is not written back to the registry heals nothing.
 
 ``_heal_store_model_if_stale`` writes the canonical model to a stale store and
-caches the store id in the process-local ``_HEALED_STORES`` set. If the new id
+caches the store id in the process-local ``_HEALED_STORES`` map. If the new id
 never reaches ``workspace_authz_store.model_id``, the next process start reads
 the STALE id back out of the registry, asks OpenFGA for the deployed model,
 finds it already canonical (the previous process wrote it), short-circuits, and
@@ -145,16 +145,17 @@ async def test_create_model_writes_shared_canonical_model(monkeypatch):
 
 
 async def test_heal_uses_process_cache(monkeypatch):
-    """Merged from the two service-side copies: a store already in
-    ``_HEALED_STORES`` short-circuits before any read of the deployed model."""
-    doc_acl._HEALED_STORES.add("store-cached")
+    """A store already in ``_HEALED_STORES`` short-circuits before any read of
+    the deployed model, and returns the model id this process healed to, not
+    the registry's (another image version may have moved the shared row)."""
+    doc_acl._HEALED_STORES["store-cached"] = "model-cached"
     svc = DocAclService()
     read = AsyncMock(return_value=_STALE_DEPLOYED)
     monkeypatch.setattr(svc, "_get_latest_model", read)
     create = AsyncMock(return_value="nope")
     monkeypatch.setattr(svc, "_create_authorization_model", create)
 
-    assert await svc._heal_store_model_if_stale("store-cached", "m-old") == "m-old"
+    assert await svc._heal_store_model_if_stale("store-cached", "m-old") == "model-cached"
     read.assert_not_awaited()
     create.assert_not_awaited()
 
