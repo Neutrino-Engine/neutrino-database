@@ -5,7 +5,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY, INET
 from sqlalchemy.sql import func, text
-from sqlalchemy import Boolean
+from sqlalchemy import Boolean, FetchedValue
 from neutrino_database.models.base import metadata
 
 from neutrino_database.models.enums import (
@@ -1730,8 +1730,8 @@ excel_datasets = Table(
 # SOC 2 (CC6.6), HIPAA (§ 164.312(b)), and GDPR (Art 30, 32). The
 # emitter helper lives in the gateway; this is just the storage.
 #
-# Hard rule: append-only. The BEFORE UPDATE/DELETE trigger below raises
-# SQLSTATE 'AU001' so the immutability invariant holds at the database
+# Hard rule: append-only. The BEFORE UPDATE/DELETE/TRUNCATE triggers below
+# raise SQLSTATE 'AU001' so the immutability invariant holds at the database
 # level — auditors won't accept "we promise we don't update it."
 #
 # See user-stories/user-lifecycle.md § "Audit log requirements" for the
@@ -1770,6 +1770,12 @@ audit_log = Table(
 
     Column("occurred_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
 
+    # Per-tenant hash chain (G-19). Set by the audit_log_chain BEFORE INSERT
+    # trigger below; any value the caller passes is overwritten.
+    Column("chain_seq", BigInteger, nullable=False, server_default=FetchedValue()),
+    Column("prev_hash", Text, nullable=True, server_default=FetchedValue()),
+    Column("row_hash", Text, nullable=False, server_default=FetchedValue()),
+
     # Tenant-scoped read path: latest events first.
     Index("ix_audit_log_tenant_occurred_at", "tenant_id", text("occurred_at DESC")),
     # Filter by event_type (e.g. show me all workspace.deleted in this tenant).
@@ -1781,6 +1787,7 @@ audit_log = Table(
         text("occurred_at DESC"),
         postgresql_where=text("actor_user_id IS NOT NULL"),
     ),
+    Index("ux_audit_log_tenant_chain_seq", "tenant_id", "chain_seq", unique=True),
 )
 
 
@@ -1821,14 +1828,103 @@ _AUDIT_LOG_DROP_FUNCTION = DDL(
     "DROP FUNCTION IF EXISTS audit_log_block_mutation()"
 )
 
+# Hash chain + TRUNCATE block (G-19). Same SQL as alembic 4a240c4c431e.
+# actor_user_id is not hashed, so the ON DELETE SET NULL above keeps the
+# chain valid. One chain per tenant, extended under a per-tenant advisory
+# xact lock (no global hot lock).
+_AUDIT_LOG_ROW_HASH_FUNCTION = DDL(
+    """
+    CREATE OR REPLACE FUNCTION audit_log_row_hash(r audit_log) RETURNS text AS $func$
+        SELECT encode(sha256(convert_to(concat_ws('|',
+            quote_nullable(r.prev_hash), r.chain_seq, r.id, r.tenant_id,
+            quote_nullable(r.event_type), quote_nullable(r.resource_type),
+            quote_nullable(r.resource_id), quote_nullable(r.event_metadata::text),
+            quote_nullable(r.ip_address::text), quote_nullable(r.user_agent),
+            to_char(r.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US')
+        ), 'UTF8')), 'hex')
+    $func$ LANGUAGE sql STABLE
+    """
+)
+_AUDIT_LOG_CHAIN_FUNCTION = DDL(
+    """
+    CREATE OR REPLACE FUNCTION audit_log_chain() RETURNS trigger AS $func$
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('audit_log_chain'), hashtext(NEW.tenant_id::text));
+        SELECT a.chain_seq + 1, a.row_hash INTO NEW.chain_seq, NEW.prev_hash
+          FROM audit_log a WHERE a.tenant_id = NEW.tenant_id
+         ORDER BY a.chain_seq DESC LIMIT 1;
+        IF NOT FOUND THEN
+            NEW.chain_seq := 1;
+            NEW.prev_hash := NULL;
+        END IF;
+        NEW.row_hash := audit_log_row_hash(NEW);
+        RETURN NEW;
+    END;
+    $func$ LANGUAGE plpgsql
+    """
+)
+_AUDIT_LOG_CHAIN_TRIGGER = DDL(
+    "CREATE TRIGGER audit_log_chain BEFORE INSERT ON audit_log "
+    "FOR EACH ROW EXECUTE FUNCTION audit_log_chain()"
+)
+_AUDIT_LOG_BLOCK_TRUNCATE_FUNCTION = DDL(
+    """
+    CREATE OR REPLACE FUNCTION audit_log_block_truncate() RETURNS trigger AS $func$
+    BEGIN
+        RAISE EXCEPTION 'audit_log is append-only; TRUNCATE blocked'
+            USING ERRCODE = 'AU001';
+    END;
+    $func$ LANGUAGE plpgsql
+    """
+)
+_AUDIT_LOG_NO_TRUNCATE_TRIGGER = DDL(
+    "CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log "
+    "FOR EACH STATEMENT EXECUTE FUNCTION audit_log_block_truncate()"
+)
+_AUDIT_LOG_VERIFY_FUNCTION = DDL(
+    """
+    CREATE OR REPLACE FUNCTION audit_log_verify_chain(p_tenant_id uuid) RETURNS uuid AS $func$
+        SELECT c.id FROM (
+            SELECT a.id, a.chain_seq, a.prev_hash, a.row_hash,
+                   audit_log_row_hash(a) AS expected_hash,
+                   lag(a.row_hash) OVER w AS previous_row_hash,
+                   row_number() OVER w AS n
+              FROM audit_log a WHERE a.tenant_id = p_tenant_id
+            WINDOW w AS (ORDER BY a.chain_seq)
+        ) c
+        WHERE c.row_hash IS DISTINCT FROM c.expected_hash
+           OR c.prev_hash IS DISTINCT FROM c.previous_row_hash
+           OR c.chain_seq <> c.n
+        ORDER BY c.chain_seq LIMIT 1
+    $func$ LANGUAGE sql STABLE
+    """
+)
+
 # After-create: function first, then trigger (idempotent — drop-if-exists first).
 event.listen(audit_log, "after_create", _AUDIT_LOG_CREATE_FUNCTION.execute_if(dialect="postgresql"))
 event.listen(audit_log, "after_create", _AUDIT_LOG_DROP_TRIGGER.execute_if(dialect="postgresql"))
 event.listen(audit_log, "after_create", _AUDIT_LOG_CREATE_TRIGGER.execute_if(dialect="postgresql"))
+for _ddl in (
+    _AUDIT_LOG_ROW_HASH_FUNCTION,
+    _AUDIT_LOG_CHAIN_FUNCTION,
+    _AUDIT_LOG_CHAIN_TRIGGER,
+    _AUDIT_LOG_BLOCK_TRUNCATE_FUNCTION,
+    _AUDIT_LOG_NO_TRUNCATE_TRIGGER,
+    _AUDIT_LOG_VERIFY_FUNCTION,
+):
+    event.listen(audit_log, "after_create", _ddl.execute_if(dialect="postgresql"))
 
 # Before-drop: trigger first, then function.
 event.listen(audit_log, "before_drop", _AUDIT_LOG_DROP_TRIGGER.execute_if(dialect="postgresql"))
 event.listen(audit_log, "before_drop", _AUDIT_LOG_DROP_FUNCTION.execute_if(dialect="postgresql"))
+event.listen(
+    audit_log,
+    "before_drop",
+    DDL(
+        "DROP FUNCTION IF EXISTS audit_log_verify_chain(uuid), audit_log_chain(), "
+        "audit_log_block_truncate(), audit_log_row_hash(audit_log) CASCADE"
+    ).execute_if(dialect="postgresql"),
+)
 
 
 # ─────────────────────────────────────────────────────────────────

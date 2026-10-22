@@ -22,6 +22,7 @@ See ``user-stories/user-lifecycle.md`` § "Audit log requirements" and
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
@@ -64,19 +65,21 @@ async def _seed_tenant(SessionMaker) -> str:
 
 async def _drop_tenant(SessionMaker, tenant_id: str) -> None:
     """
-    Cleanup: clear audit_log rows for this tenant via TRUNCATE-style
-    (the BEFORE UPDATE/DELETE trigger blocks DELETE; TRUNCATE skips the
-    row trigger), then delete the tenant. In production the retention
-    runner is the only thing that removes audit_log rows, but tests
-    need a quick way to reset state.
+    Cleanup: clear audit_log, then delete the tenant. UPDATE, DELETE and
+    TRUNCATE are all blocked by triggers, so the test (a superuser) uses
+    the break-glass: session_replication_role = replica skips ordinary
+    triggers for this transaction only. It is reset before the tenant
+    DELETE so that statement's FK cascades still fire.
     """
     async with SessionMaker() as cleanup:
         async with cleanup.begin():
+            await cleanup.execute(sa.text("SET LOCAL session_replication_role = replica"))
             await cleanup.execute(
                 sa.text(
                     "TRUNCATE TABLE audit_log RESTART IDENTITY CASCADE"
                 )
             )
+            await cleanup.execute(sa.text("SET LOCAL session_replication_role = DEFAULT"))
             await cleanup.execute(
                 sa.delete(Tenant).where(Tenant.id == tenant_id)
             )
@@ -407,6 +410,144 @@ class TestAuditLogImmutability:
                             .values(event_type="tampered")
                         )
             assert getattr(excinfo.value.orig, "sqlstate", None) == "AU001"
+
+            # actor_user_id is outside the hash, so the chain still verifies.
+            assert await _verify_chain(test_engine, tenant_id) is None
+        finally:
+            await _drop_tenant(SessionMaker, tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_truncate_raises_au001(self, test_engine):
+        """TRUNCATE skips row triggers, so a statement-level trigger blocks it."""
+        with pytest.raises(DBAPIError) as excinfo:
+            async with test_engine.begin() as conn:
+                await conn.execute(sa.text("TRUNCATE TABLE audit_log"))
+        assert getattr(excinfo.value.orig, "sqlstate", None) == "AU001"
+
+
+# ---------------------------------------------------------------------------
+# Hash chain (G-19): per-tenant chain set by the BEFORE INSERT trigger.
+# ---------------------------------------------------------------------------
+
+
+async def _insert_event(SessionMaker, tenant_id: str, **extra) -> str:
+    row_id = str(uuid.uuid4())
+    async with SessionMaker() as session:
+        async with session.begin():
+            session.add(
+                AuditLog(
+                    id=row_id,
+                    tenant_id=tenant_id,
+                    event_type="test.event",
+                    resource_type="test",
+                    resource_id=_unique(),
+                    **extra,
+                )
+            )
+    return row_id
+
+
+async def _verify_chain(engine, tenant_id: str):
+    async with engine.connect() as conn:
+        return await conn.scalar(
+            sa.text("SELECT audit_log_verify_chain(:t)::text"), {"t": tenant_id}
+        )
+
+
+async def _chain(engine, tenant_id: str):
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            sa.text(
+                "SELECT id::text, chain_seq, prev_hash, row_hash FROM audit_log "
+                "WHERE tenant_id = :t ORDER BY chain_seq"
+            ),
+            {"t": tenant_id},
+        )
+        return result.fetchall()
+
+
+async def _tamper(engine, sql: str, params: dict) -> None:
+    """Superuser break-glass: bypass the immutability triggers."""
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("SET LOCAL session_replication_role = replica"))
+        await conn.execute(sa.text(sql), params)
+
+
+class TestAuditLogHashChain:
+    @pytest.mark.asyncio
+    async def test_insert_extends_the_tenant_chain(self, test_engine):
+        SessionMaker = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+        tenant_id = await _seed_tenant(SessionMaker)
+        other_tenant_id = await _seed_tenant(SessionMaker)
+        try:
+            first = await _insert_event(SessionMaker, tenant_id)
+            await _insert_event(SessionMaker, other_tenant_id)
+            # Caller-supplied chain values are overwritten by the trigger.
+            second = await _insert_event(
+                SessionMaker, tenant_id, chain_seq=99, prev_hash="x", row_hash="y"
+            )
+
+            rows = await _chain(test_engine, tenant_id)
+            assert [(r.id, r.chain_seq) for r in rows] == [(first, 1), (second, 2)]
+            assert rows[0].prev_hash is None
+            assert rows[1].prev_hash == rows[0].row_hash
+            assert all(len(r.row_hash) == 64 for r in rows)
+            assert [r.chain_seq for r in await _chain(test_engine, other_tenant_id)] == [1]
+            assert await _verify_chain(test_engine, tenant_id) is None
+        finally:
+            await _drop_tenant(SessionMaker, tenant_id)
+            await _drop_tenant(SessionMaker, other_tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_inserts_keep_the_chain_valid(self, test_engine):
+        """NullPool: every session is its own connection, so these race for real."""
+        SessionMaker = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+        tenant_id = await _seed_tenant(SessionMaker)
+        try:
+            await asyncio.gather(*(_insert_event(SessionMaker, tenant_id) for _ in range(20)))
+            rows = await _chain(test_engine, tenant_id)
+            assert [r.chain_seq for r in rows] == list(range(1, 21))
+            assert await _verify_chain(test_engine, tenant_id) is None
+        finally:
+            await _drop_tenant(SessionMaker, tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_verify_finds_an_edited_row(self, test_engine):
+        SessionMaker = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+        tenant_id = await _seed_tenant(SessionMaker)
+        try:
+            ids = [await _insert_event(SessionMaker, tenant_id) for _ in range(3)]
+            await _tamper(
+                test_engine,
+                "UPDATE audit_log SET event_metadata = '{\"x\": 1}' WHERE id = :id",
+                {"id": ids[1]},
+            )
+            assert await _verify_chain(test_engine, tenant_id) == ids[1]
+        finally:
+            await _drop_tenant(SessionMaker, tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_verify_finds_a_rehashed_edit_and_a_deleted_row(self, test_engine):
+        SessionMaker = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+        tenant_id = await _seed_tenant(SessionMaker)
+        try:
+            ids = [await _insert_event(SessionMaker, tenant_id) for _ in range(4)]
+            # Edit row 2 and recompute its own hash: row 3's prev_hash now breaks.
+            await _tamper(
+                test_engine,
+                "UPDATE audit_log SET event_type = 'tampered' WHERE id = :id",
+                {"id": ids[1]},
+            )
+            await _tamper(
+                test_engine,
+                "UPDATE audit_log a SET row_hash = audit_log_row_hash(a) WHERE id = :id",
+                {"id": ids[1]},
+            )
+            assert await _verify_chain(test_engine, tenant_id) == ids[2]
+
+            # Deleting the first row breaks the sequence at the new first row.
+            await _tamper(test_engine, "DELETE FROM audit_log WHERE id = :id", {"id": ids[0]})
+            assert await _verify_chain(test_engine, tenant_id) == ids[1]
         finally:
             await _drop_tenant(SessionMaker, tenant_id)
 
