@@ -1,0 +1,56 @@
+{
+ "results": [
+  {
+   "code": "131     op.execute(\n132         f\"\"\"\n133         UPDATE {table_name}\n134            SET description = ai_generated_description,\n135                description_origin = 'ai',\n136                ai_last_generated_at = updated_at\n137          WHERE ai_generated_description IS NOT NULL\n138            AND description IS NULL\n139         \"\"\"\n140     )\n",
+   "col_offset": 12,
+   "end_col_offset": 15,
+   "filename": "./alembic/versions/b5c6d7e8f9a0_da_description_trust_fields.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 132,
+   "line_range": [
+    132,
+    133,
+    134,
+    135,
+    136,
+    137,
+    138,
+    139
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.8.6/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "171     op.execute(\n172         f\"\"\"\n173         UPDATE {table_name}\n174            SET ai_generated_description = description,\n175                description = NULL\n176          WHERE description_origin = 'ai'\n177         \"\"\"\n178     )\n",
+   "col_offset": 12,
+   "end_col_offset": 15,
+   "filename": "./alembic/versions/b5c6d7e8f9a0_da_description_trust_fields.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 172,
+   "line_range": [
+    172,
+    173,
+    174,
+    175,
+    176,
+    177
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.8.6/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  }
+ ]
+}
