@@ -518,10 +518,27 @@ tenant = Table(
         nullable=False,
         server_default=text("'{}'::text[]"),
     ),
+    # Outbound egress allow-list (NC-793 F1). Lowercased app-side.
+    # 'monitor' logs would-be blocks, 'enforce' blocks them. Existing
+    # tenants default to 'monitor'; new-tenant creation sets 'enforce'.
+    Column(
+        "egress_allowed_domains",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column(
+        "egress_allowed_email_domains",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column("egress_mode", Text, nullable=False, server_default=text("'monitor'")),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
 
+    CheckConstraint("egress_mode IN ('monitor', 'enforce')", name="ck_tenant_egress_mode"),
     Index("ix_tenant_status", "status"),
     Index("ix_tenant_created_at", "created_at"),
 )
