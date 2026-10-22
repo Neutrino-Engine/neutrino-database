@@ -125,6 +125,7 @@ class Tenant(Base):
     egress_allowed_domains: Mapped[List[str]]
     egress_allowed_email_domains: Mapped[List[str]]
     egress_mode: Mapped[str]
+    require_mfa_local: Mapped[bool]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
     deleted_at: Mapped[Optional[datetime]]
@@ -340,6 +341,22 @@ class PlatformUser(Base):
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
     deleted_at: Mapped[Optional[datetime]]
+
+
+class MfaTotp(Base):
+    """ORM wrapper for mfa_totp (NC-795 G-30)."""
+    __table__ = tables.mfa_totp
+
+    id: Mapped[str]
+    user_id: Mapped[Optional[str]]
+    platform_user_id: Mapped[Optional[str]]
+    secret_encrypted: Mapped[str]
+    secret_key_id: Mapped[Optional[str]]
+    enrolled_at: Mapped[Optional[datetime]]
+    last_used_step: Mapped[Optional[int]]
+    recovery_code_hashes: Mapped[List[str]]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
 
 
 class TenantIdentity(Base):

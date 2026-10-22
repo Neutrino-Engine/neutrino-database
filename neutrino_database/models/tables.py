@@ -534,6 +534,9 @@ tenant = Table(
         server_default=text("'{}'::text[]"),
     ),
     Column("egress_mode", Text, nullable=False, server_default=text("'monitor'")),
+    # NC-795 G-30: local-password users must complete TOTP MFA. Existing
+    # tenants default off; new-tenant creation sets it on app-side.
+    Column("require_mfa_local", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
@@ -628,6 +631,34 @@ platform_user = Table(
         unique=True,
         postgresql_where=text("deleted_at IS NULL"),
     ),
+)
+
+# NC-795 G-30 — TOTP MFA enrolment, one row per local user OR platform
+# operator (exactly one FK set). ``enrolled_at`` NULL = a pending enrolment
+# the owner has not yet confirmed with a code. The secret is AES-GCM
+# ciphertext from the gateway's encryption helper; ``secret_key_id`` names
+# the key once key ids exist (NULL = the original master key).
+# ``last_used_step`` is the last accepted RFC 6238 time step, so a code
+# cannot be replayed inside its window. Recovery codes are bcrypt hashes,
+# removed from the array as they are used.
+mfa_totp = Table(
+    "mfa_totp",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), nullable=True),
+    Column("platform_user_id", UUID(as_uuid=False), ForeignKey("platform_user.id", ondelete="CASCADE"), nullable=True),
+    Column("secret_encrypted", Text, nullable=False),
+    Column("secret_key_id", String(64), nullable=True),
+    Column("enrolled_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("last_used_step", BigInteger, nullable=True),
+    Column("recovery_code_hashes", ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+
+    CheckConstraint("(user_id IS NULL) <> (platform_user_id IS NULL)", name="ck_mfa_totp_one_owner"),
+    UniqueConstraint("user_id", name="ux_mfa_totp_user"),
+    UniqueConstraint("platform_user_id", name="ux_mfa_totp_platform_user"),
 )
 
 tenant_identity = Table(
