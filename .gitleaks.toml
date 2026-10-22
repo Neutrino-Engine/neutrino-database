@@ -1,0 +1,22 @@
+# Secret scanning (G-01, plans/SECURITY-P0-PLAN.md). Default rules plus three that the
+# defaults miss: base64 Basic headers hide the token prefix, and our own key formats.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "basic-auth-header"
+description = "HTTP Basic authorization header with an encoded credential"
+regex = '''(?i)authorization["'\s:=]+basic\s+[A-Za-z0-9+/=]{40,}'''
+
+[[rules]]
+id = "gateway-api-key"
+description = "Neutrino gateway API key"
+regex = '''\bsk-[A-Za-z0-9_-]{40,}\b'''
+
+[[rules]]
+id = "studio-api-key"
+description = "Neutrino Studio API key"
+regex = '''\bnsk_[A-Za-z0-9_-]{30,}\b'''
+
+[allowlist]
+paths = ['''(^|/)tests?/fixtures/''']
