@@ -13,13 +13,13 @@ row under an ACCESS EXCLUSIVE lock: audit inserts wait for the whole backfill.
 Break-glass (superuser only): SET LOCAL session_replication_role = replica.
 
 Revision ID: 4a240c4c431e
-Revises: 6d614411adef
+Revises: e1b5a7c9d3f6
 Create Date: 2026-10-22
 """
 from alembic import op
 
 revision = "4a240c4c431e"
-down_revision = "6d614411adef"
+down_revision = "e1b5a7c9d3f6"
 branch_labels = None
 depends_on = None
 
