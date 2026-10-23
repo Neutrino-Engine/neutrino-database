@@ -122,6 +122,9 @@ class Tenant(Base):
     onboarding_completed_at: Mapped[Optional[datetime]]
     max_workspaces: Mapped[int]
     allowed_invitation_domains: Mapped[List[str]]
+    egress_allowed_domains: Mapped[List[str]]
+    egress_allowed_email_domains: Mapped[List[str]]
+    egress_mode: Mapped[str]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
     deleted_at: Mapped[Optional[datetime]]
@@ -955,9 +958,9 @@ class Provider(Base):  # ← Singular, not Providers
 class AuditLog(Base):
     """ORM wrapper for audit_log — append-only compliance event store.
 
-    UPDATE and DELETE on this table raise SQLSTATE AU001 via the
-    audit_log_immutability Postgres trigger (installed in tables.py).
-    Use INSERT only.
+    UPDATE, DELETE and TRUNCATE on this table raise SQLSTATE AU001 via
+    Postgres triggers (installed in tables.py). Use INSERT only;
+    chain_seq/prev_hash/row_hash are set by the audit_log_chain trigger.
 
     See user-stories/user-lifecycle.md § "Audit log requirements".
     """
@@ -973,6 +976,9 @@ class AuditLog(Base):
     ip_address: Mapped[Optional[str]]
     user_agent: Mapped[Optional[str]]
     occurred_at: Mapped[datetime]
+    chain_seq: Mapped[int]
+    prev_hash: Mapped[Optional[str]]
+    row_hash: Mapped[str]
 
 
 class TenancyOwnershipTransfer(Base):

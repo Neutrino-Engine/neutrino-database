@@ -64,8 +64,9 @@ def upgrade() -> None:
         op.add_column(table, sa.Column("active_version_id", UUID(as_uuid=False), nullable=True))
         op.create_foreign_key(fk, table, version_table, ["active_version_id"], ["id"], ondelete="SET NULL")
         # Existing rows: lineage = own id. New rows: the server default.
+        # (bandit B608: table comes from the constant tuple above, never input.)
         op.add_column(table, sa.Column("lineage_id", UUID(as_uuid=False), nullable=True))
-        op.execute(f"UPDATE {table} SET lineage_id = id")
+        op.execute(f"UPDATE {table} SET lineage_id = id")  # nosec B608
         op.alter_column(table, "lineage_id", nullable=False, server_default=sa.text("gen_random_uuid()"))
 
     for version_table in ("studio_agent_version", "studio_team_version"):
@@ -81,6 +82,7 @@ def upgrade() -> None:
 
     # ── backfill ────────────────────────────────────────────────────────
     for kind in ("agent", "team"):
+        # (bandit B608: kind is from the constant tuple, never input.)
         op.execute(f"""
             UPDATE studio_{kind} s SET active_version_id = v.id
             FROM (
@@ -88,7 +90,7 @@ def upgrade() -> None:
                 FROM studio_{kind}_version ORDER BY {kind}_id, version DESC
             ) v
             WHERE v.{kind}_id = s.id
-        """)
+        """)  # nosec B608
 
     op.execute("""
         INSERT INTO workflow_version

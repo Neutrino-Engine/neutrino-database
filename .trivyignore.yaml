@@ -1,0 +1,77 @@
+# Trivy baseline (S7 / G-08): HIGH/CRITICAL findings that already existed on uat
+# when the PR gate landed (2026-10-22). Each entry stops being ignored after
+# expired_at and the container job fails again: fix it, or re-justify and push
+# the date out. Never add an entry without expired_at.
+misconfigurations:
+  - id: DS-0002
+    paths: ["Dockerfile"]
+    expired_at: 2027-01-20
+    statement: "baseline: Image user should not be 'root'"
+  - id: DS-0029
+    paths: ["Dockerfile"]
+    expired_at: 2027-01-20
+    statement: "baseline: 'apt-get' missing '--no-install-recommends'"
+vulnerabilities:
+  - id: CVE-2026-103111
+    expired_at: 2027-01-20
+    statement: "baseline: libpcre2-8-0 10.46-1~deb13u1 -> 10.46-1~deb13u3"
+  - id: CVE-2026-11822
+    expired_at: 2027-01-20
+    statement: "baseline: libsqlite3-0 3.46.1-7+deb13u1 -> 3.46.1-7+deb13u2"
+  - id: CVE-2026-11824
+    expired_at: 2027-01-20
+    statement: "baseline: libsqlite3-0 3.46.1-7+deb13u1 -> 3.46.1-7+deb13u2"
+  - id: CVE-2026-13221
+    expired_at: 2027-01-20
+    statement: "baseline: perl-base 5.40.1-6 -> 5.40.1-6+deb13u1"
+  - id: CVE-2026-23949
+    expired_at: 2027-01-20
+    statement: "baseline: jaraco.context 5.3.0 -> 6.1.0"
+  - id: CVE-2026-24049
+    expired_at: 2027-01-20
+    statement: "baseline: wheel 0.45.1 -> 0.46.2"
+  - id: CVE-2026-41992
+    expired_at: 2027-01-20
+    statement: "baseline: gzip 1.13-1 -> 1.13-1+deb13u1"
+  - id: CVE-2026-42496
+    expired_at: 2027-01-20
+    statement: "baseline: perl-base 5.40.1-6 -> 5.40.1-6+deb13u1"
+  - id: CVE-2026-42497
+    expired_at: 2027-01-20
+    statement: "baseline: perl-base 5.40.1-6 -> 5.40.1-6+deb13u1"
+  - id: CVE-2026-4878
+    expired_at: 2027-01-20
+    statement: "baseline: libcap2 1:2.75-10+b8 -> 1:2.75-10+deb13u1"
+  - id: CVE-2026-48962
+    expired_at: 2027-01-20
+    statement: "baseline: perl-base 5.40.1-6 -> 5.40.1-6+deb13u1"
+  - id: CVE-2026-53612
+    expired_at: 2027-01-20
+    statement: "baseline: bsdutils 1:2.41-5 -> 2.41.5-0+deb13u1; libblkid1 2.41-5 -> 2.41.5-0+deb13u1; liblastlog2-2 2.41-5 -> 2.41.5-0+deb13u1; libmount1 2.41-5 -> 2.41.5-0+deb13u1; libsmartcols1 2.41-5 -> 2.41.5-0+deb13u1; l"
+  - id: CVE-2026-53613
+    expired_at: 2027-01-20
+    statement: "baseline: bsdutils 1:2.41-5 -> 2.41.5-0+deb13u1; libblkid1 2.41-5 -> 2.41.5-0+deb13u1; liblastlog2-2 2.41-5 -> 2.41.5-0+deb13u1; libmount1 2.41-5 -> 2.41.5-0+deb13u1; libsmartcols1 2.41-5 -> 2.41.5-0+deb13u1; l"
+  - id: CVE-2026-53614
+    expired_at: 2027-01-20
+    statement: "baseline: bsdutils 1:2.41-5 -> 2.41.5-0+deb13u1; libblkid1 2.41-5 -> 2.41.5-0+deb13u1; liblastlog2-2 2.41-5 -> 2.41.5-0+deb13u1; libmount1 2.41-5 -> 2.41.5-0+deb13u1; libsmartcols1 2.41-5 -> 2.41.5-0+deb13u1; l"
+  - id: CVE-2026-53615
+    expired_at: 2027-01-20
+    statement: "baseline: bsdutils 1:2.41-5 -> 2.41.5-0+deb13u1; libblkid1 2.41-5 -> 2.41.5-0+deb13u1; liblastlog2-2 2.41-5 -> 2.41.5-0+deb13u1; libmount1 2.41-5 -> 2.41.5-0+deb13u1; libsmartcols1 2.41-5 -> 2.41.5-0+deb13u1; l"
+  - id: CVE-2026-57432
+    expired_at: 2027-01-20
+    statement: "baseline: perl-base 5.40.1-6 -> 5.40.1-6+deb13u1"
+  - id: CVE-2026-57433
+    expired_at: 2027-01-20
+    statement: "baseline: perl-base 5.40.1-6 -> 5.40.1-6+deb13u1"
+  - id: CVE-2026-8376
+    expired_at: 2027-01-20
+    statement: "baseline: perl-base 5.40.1-6 -> 5.40.1-6+deb13u1"
+  - id: CVE-2026-86145
+    expired_at: 2027-01-20
+    statement: "baseline: libpcre2-8-0 10.46-1~deb13u1 -> 10.46-1~deb13u2"
+  - id: CVE-2026-89157
+    expired_at: 2027-01-20
+    statement: "baseline: libpcre2-8-0 10.46-1~deb13u1 -> 10.46-1~deb13u2"
+  - id: CVE-2026-89161
+    expired_at: 2027-01-20
+    statement: "baseline: libpcre2-8-0 10.46-1~deb13u1 -> 10.46-1~deb13u2"

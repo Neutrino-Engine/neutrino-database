@@ -1,0 +1,212 @@
+# PR quality gate (security stream S7 / G-08, NC-793).
+# Each job is separate so branch protection can require them one by one.
+# Baselines for findings that already existed on uat when the gate landed:
+#   SAST       .bandit-baseline.json  (bandit -b; only NEW findings fail)
+#   SCA        .pip-audit-ignore      (one advisory per line, with expiry date)
+#   container  .trivyignore.yaml      (expired_at per entry)
+# An expired baseline entry fails the gate again, so it must be fixed or re-justified.
+name: pr
+
+on:
+  pull_request:
+  push:
+    branches: [uat, dev, main, release-cmd]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  # neutrino-database ref = the branch this code is merging into (or was pushed to),
+  # so uat code is checked against the uat schema package. Unknown branches use uat.
+  NEUTRINO_DB_REF: ${{ contains(fromJSON('["uat","dev","main","release-cmd"]'), github.base_ref || github.ref_name) && (github.base_ref || github.ref_name) || 'uat' }}
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install ruff==0.15.11
+      # Errors-only ruleset (syntax errors, undefined names, invalid comparisons):
+      # passes on uat today. The repo's [tool.ruff] excludes still apply; its
+      # wider rule selection is not gated yet - tighten here as debt is paid down.
+      - name: ruff
+        run: |
+          ruff check . --select E9,F63,F7,F82 --output-format github
+
+  sast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install bandit==1.8.6
+      # Medium+ severity and confidence. Regenerate the baseline only to drop fixed
+      # findings: bandit -r . -x ./tests -ll -ii -f json -o .bandit-baseline.json
+      - name: bandit
+        run: bandit -q -r . -x ./tests -ll -ii -b .bandit-baseline.json
+
+  sca:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install pip-audit==2.9.0
+      # pip-audit reports no severity, so every known advisory fails unless it is
+      # listed in .pip-audit-ignore with an expiry date that has not passed.
+      - name: pip-audit
+        run: |
+          cp requirements.txt "$RUNNER_TEMP/reqs.txt"
+          ignores=$(awk -v today="$(date +%F)" '!/^#/ && NF && $4 >= today {printf "--ignore-vuln %s ", $1}' .pip-audit-ignore)
+          # shellcheck disable=SC2086
+          pip-audit -r "$RUNNER_TEMP/reqs.txt" --progress-spinner off --desc on $ignores
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: Dockerfile
+            target: ""
+    env:
+      DOCKERFILE: ${{ matrix.dockerfile }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # Trivy binary pinned by version + sha256 (no third-party action).
+      - name: Install trivy 0.75.0
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/trivy.tgz" \
+            https://github.com/aquasecurity/trivy/releases/download/v0.75.0/trivy_0.75.0_Linux-64bit.tar.gz
+          echo "c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f  $RUNNER_TEMP/trivy.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/trivy.tgz" -C "$RUNNER_TEMP" trivy
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Trivy config scan (all Dockerfiles in the repo)
+        run: |
+          trivy config --misconfig-scanners dockerfile --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore.yaml --exit-code 1 .
+      # Same BuildKit secret as deploy-prod.yml. neutrino-database is public today,
+      # so the build also works when the secret is absent (fork / Dependabot PRs).
+      - name: Build image
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --secret id=github_token,env=GH_PACKAGES_TOKEN \
+            --build-arg NEUTRINO_DB_REF="$NEUTRINO_DB_REF" \
+            ${TARGET:+--target "$TARGET"} \
+            -f "$DOCKERFILE" -t pr-scan:ci .
+      - name: Trivy image scan
+        run: |
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --ignorefile .trivyignore.yaml --exit-code 1 pr-scan:ci
+
+  tests:
+    # Not required yet: pre-existing failures on uat. Once the suite is green, run
+    # the test command as a plain step (drop the exit-0 wrapper) and require the check.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: neutrino_test_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/neutrino_test_db
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt -e .
+      # Informational: the step always exits 0 so the check is not painted red (a
+      # job-level continue-on-error alone still shows a red X). Failures go to the
+      # job summary and a warning annotation instead.
+      - name: tests (informational)
+        run: |
+          set +e
+          pytest -q -p no:cacheprovider 2>&1 | tee "$RUNNER_TEMP/tests.log"
+          rc=${PIPESTATUS[0]}
+          {
+            echo "### tests (informational, not required): exit code $rc"
+            echo '```'
+            tail -n 80 "$RUNNER_TEMP/tests.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning title=tests (informational)::pytest exited $rc - see the job summary"
+          fi
+
+  alembic:
+    # Migration chain integrity on a fresh database: exactly one head, and the
+    # newest revision must round-trip (upgrade -> downgrade -1 -> upgrade).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: neutrino_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/neutrino_ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt -e .
+      - name: Exactly one alembic head
+        run: |
+          heads=$(alembic heads)
+          echo "$heads"
+          count=$(printf '%s\n' "$heads" | grep -c . || true)
+          if [ "$count" -ne 1 ]; then
+            echo "::error::expected exactly 1 alembic head, found $count (merge the branches)"
+            exit 1
+          fi
+      - run: alembic upgrade head
+      - run: alembic downgrade -1
+      - run: alembic upgrade head
