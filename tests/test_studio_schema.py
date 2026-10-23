@@ -362,3 +362,15 @@ def test_shared_contracts_refuse_partial_success():
     cfg = TeamConfig(orchestrator={"model": "m"}, output_schema={"type": "object"},
                      roster=[{"alias": "x", "agent_id": agent_id}], runs_as={"kind": "service"})
     assert cfg.runs_as.identity_id is None
+
+
+def test_team_config_carries_allowed_runner_ids():
+    """G-34: who may start an owner/service-identity team. Defaults empty
+    (owner + workspace admins only); rejects anything that is not a UUID."""
+    base = dict(orchestrator={"model": "m"}, output_schema={"type": "object"},
+                roster=[{"alias": "x", "agent_id": uuid.uuid4()}])
+    assert TeamConfig(**base).allowed_runner_ids == []
+    runner = uuid.uuid4()
+    assert TeamConfig(**base, allowed_runner_ids=[str(runner)]).allowed_runner_ids == [runner]
+    with pytest.raises(ValidationError):
+        TeamConfig(**base, allowed_runner_ids=["not-a-uuid"])
