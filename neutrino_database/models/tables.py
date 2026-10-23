@@ -658,8 +658,8 @@ platform_user = Table(
 # NC-795 G-30 — TOTP MFA enrolment, one row per local user OR platform
 # operator (exactly one FK set). ``enrolled_at`` NULL = a pending enrolment
 # the owner has not yet confirmed with a code. The secret is AES-GCM
-# ciphertext from the gateway's encryption helper; ``secret_key_id`` names
-# the key once key ids exist (NULL = the original master key).
+# ciphertext from the gateway's G-41 key ring; ``secret_key_id`` mirrors the
+# ciphertext's kid (``legacy`` or a PROVIDER_KEY_ENCRYPTION_KEYS id).
 # ``last_used_step`` is the last accepted RFC 6238 time step, so a code
 # cannot be replayed inside its window. Recovery codes are bcrypt hashes,
 # removed from the array as they are used.
