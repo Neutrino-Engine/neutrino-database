@@ -358,9 +358,10 @@ def test_shared_contracts_refuse_partial_success():
             roster=[{"alias": "x", "agent_id": agent_id}],
             guardrails={"required_aliases": ["nope"]},
         )
-    with pytest.raises(ValidationError):
-        TeamConfig(orchestrator={"model": "m"}, output_schema={"type": "object"},
-                   roster=[{"alias": "x", "agent_id": agent_id}], runs_as={"kind": "service"})
+    # ADLC D25: no identity_id means the workspace's service-user ROLE, so this is valid.
+    cfg = TeamConfig(orchestrator={"model": "m"}, output_schema={"type": "object"},
+                     roster=[{"alias": "x", "agent_id": agent_id}], runs_as={"kind": "service"})
+    assert cfg.runs_as.identity_id is None
 
 
 def test_team_config_carries_allowed_runner_ids():

@@ -7,7 +7,7 @@ tenant.require_mfa_local BOOLEAN NOT NULL DEFAULT false: existing tenants
 off; new-tenant creation turns it on app-side.
 
 Revision ID: b4d2e6f8a1c3
-Revises: 7e3b9c1d5a20
+Revises: c1e7a3d9f2b4
 Create Date: 2026-10-22
 """
 import sqlalchemy as sa
@@ -15,7 +15,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 
 revision = "b4d2e6f8a1c3"
-down_revision = "7e3b9c1d5a20"
+down_revision = "c1e7a3d9f2b4"
 branch_labels = None
 depends_on = None
 

@@ -18,10 +18,10 @@ Contracts:
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 
 RunStatus = Literal[
@@ -132,9 +132,24 @@ class Ordering(_Strict):
     after: str
 
 
+GroupKey = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,63}$")]
+
+#: ADLC WS2 (D5/D26): what ``model`` means. A config names an alias; each
+#: workspace maps it to a provider (``workspace.llm_task_lanes``). Anything
+#: else is a pre-alias deployment name and is read as ``reasoning``.
+MODEL_ALIASES: tuple[str, ...] = ("reasoning", "economy", "vision")
+
+
+def model_alias(value: str | None) -> str:
+    return value if value in MODEL_ALIASES else "reasoning"
+
+
 class MandatoryGate(_Strict):
     after_alias: str
     approver_ids: list[UUID] = Field(default_factory=list)
+    # ADLC WS2 (D24): ``approver_group.key`` values, expanded to members when
+    # the gate is raised. Union with ``approver_ids``.
+    approver_groups: list[GroupKey] = Field(default_factory=list)
 
 
 class Guardrails(_Strict):
@@ -151,20 +166,19 @@ class Guardrails(_Strict):
 
 class RunsAs(_Strict):
     kind: Literal["invoker", "owner", "service"] = "invoker"
-    # user id for owner/service; ignored for invoker.
+    # ADLC WS2 (D25): optional. NULL means the ROLE — the workspace's
+    # ``automation_owner_user_id`` (owner) or ``service_user_id`` (service) —
+    # which is what makes a config portable. A user id here still works but
+    # does not survive promotion to another environment. Ignored for invoker.
     identity_id: Optional[UUID] = None
-
-    @model_validator(mode="after")
-    def _identity_present(self):
-        if self.kind != "invoker" and self.identity_id is None:
-            raise ValueError(f"runs_as.kind={self.kind} requires identity_id")
-        return self
 
 
 class NotificationTarget(_Strict):
-    kind: Literal["email", "connector"]
-    # email: address; connector: integration_id + action + static params.
+    kind: Literal["email", "connector", "group"]
+    # email: address; connector: integration_id + action + static params;
+    # group: every member of ``approver_group`` ``group`` (ADLC WS2).
     address: Optional[str] = None
+    group: Optional[GroupKey] = None
     integration_id: Optional[UUID] = None
     action: Optional[str] = None
     params: dict[str, Any] = Field(default_factory=dict)
@@ -200,6 +214,7 @@ class TeamConfig(_Strict):
     # owner, workspace admins and these members may start a run. Ignored for
     # runs_as=invoker (the run carries the starter's own access).
     allowed_runner_ids: list[UUID] = Field(default_factory=list)
+    approver_groups: list[GroupKey] = Field(default_factory=list)
     # wait — pause for a human; deny — unattended runs refuse the write instead.
     approval_policy: Literal["wait", "deny"] = "wait"
     approval_timeout_s: int = Field(72 * 3600, ge=60)
