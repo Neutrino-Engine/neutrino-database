@@ -27,6 +27,34 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
+  # Supply chain (T9 / G-27): every base image (FROM, COPY --from, # syntax) is
+  # pinned by sha256 digest and every action by a full commit SHA. Fails on the
+  # first unpinned reference. Re-resolve a digest with
+  # `docker buildx imagetools inspect <image:tag>`.
+  pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Base images and actions are pinned
+        run: |
+          fail=0
+          for f in $(git ls-files | grep -E '(^|/)Dockerfile[^/]*$'); do
+            stages=$(awk 'toupper($1)=="FROM" && toupper($(NF-1))=="AS" {print tolower($NF)}' "$f")
+            for ref in $(awk 'toupper($1)=="FROM" {print ($2 ~ /^--platform/) ? $3 : $2}' "$f") \
+                       $(grep -oE '^# syntax=[^ ]+|--from=[^ ]*[:/][^ ]*' "$f" | sed -E 's/^(# syntax|--from)=//'); do
+              echo "$ref" | grep -qE '@sha256:[0-9a-f]{64}$' && continue
+              echo "$stages" | grep -qxF "$(echo "$ref" | tr '[:upper:]' '[:lower:]')" && continue
+              echo "::error file=$f::not pinned by digest: $ref"; fail=1
+            done
+          done
+          if grep -nE '^[[:space:]-]*uses:[[:space:]]*[^.[:space:]][^@]*@' .github/workflows/*.yml | grep -vE '@[0-9a-f]{40}([[:space:]]|$)'; then
+            echo "::error::actions must be pinned by a full commit SHA"; fail=1
+          fi
+          exit $fail
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
