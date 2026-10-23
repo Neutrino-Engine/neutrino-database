@@ -7,7 +7,7 @@
   failed run resumes. At most one open (pending/running) request per target.
 
 Revision ID: b5d2e8f1a9c3
-Revises: 7e3b9c1d5a20
+Revises: b4d2e6f8a1c3
 Create Date: 2026-10-22
 """
 import sqlalchemy as sa
@@ -15,7 +15,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision = "b5d2e8f1a9c3"
-down_revision = "7e3b9c1d5a20"
+down_revision = "b4d2e6f8a1c3"
 branch_labels = None
 depends_on = None
 

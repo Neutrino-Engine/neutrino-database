@@ -6,7 +6,7 @@ the provider sees them (``openai/gpt-4o`` on OpenRouter, a deployment name
 on Azure), optionally with ``*`` globs; matched case-insensitively app-side.
 
 Revision ID: 9c4d2e7f1b38
-Revises: 7e3b9c1d5a20
+Revises: b5d2e8f1a9c3
 Create Date: 2026-10-22
 """
 import sqlalchemy as sa
@@ -14,7 +14,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import ARRAY
 
 revision = "9c4d2e7f1b38"
-down_revision = "7e3b9c1d5a20"
+down_revision = "b5d2e8f1a9c3"
 branch_labels = None
 depends_on = None
 
