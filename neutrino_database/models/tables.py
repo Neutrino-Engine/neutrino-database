@@ -4721,6 +4721,58 @@ studio_gate_run = Table(
 )
 
 
+# ADLC close-out C1 — the workflow twin of studio_test_case / studio_gate_run.
+# A case is a trigger payload plus expectations on step outputs and agent-node
+# tool calls. ``expectations``: [{step_id, path, op, expected}] with op one of
+# exact | contains | schema (on the step's output at ``path``) or tool_called |
+# tool_not_called | tool_sequence (on the calls of the agent node ``step_id``).
+# An ``injection`` case carries an instruction-override payload in its input
+# and asserts write tools were NOT called.
+workflow_test_case = Table(
+    "workflow_test_case",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("input", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("expectations", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("kind", String(16), nullable=False, server_default=text("'normal'")),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    CheckConstraint("kind IN ('normal','injection')", name="ck_workflow_test_case_kind"),
+    Index("ix_workflow_test_case_workflow", "workflow_id"),
+)
+
+
+# One gate execution of a workflow version: every case run once as a sandboxed
+# (shadow-mechanics) run. ``results`` = per case [{case_id, name, kind, passed,
+# trials: [{run_id, run_status, passed, failures}]}]; ``summary`` = {passed,
+# total, passed_cases, min_cases, min_cases_met, injection_required,
+# injection_covered, reasons, content_hash}. Protected-workspace activation
+# needs the version's latest gate run to have passed.
+workflow_gate_run = Table(
+    "workflow_gate_run",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
+    Column("version_id", UUID(as_uuid=False), ForeignKey("workflow_version.id", ondelete="CASCADE"), nullable=False),
+    Column("status", String(16), nullable=False, server_default=text("'running'")),
+    Column("results", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("summary", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("error", Text, nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("started_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("finished_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("status IN ('running','passed','failed','error')", name="ck_workflow_gate_run_status"),
+    Index("ix_workflow_gate_run_version", "version_id", "started_at"),
+)
+
+
 # ADLC WS5 (D40) — thumbs + comment on any run; thumbs-down and failed runs
 # land in the workspace review queue, whence one click makes a test case.
 run_feedback = Table(
