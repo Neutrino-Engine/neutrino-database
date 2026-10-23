@@ -545,6 +545,14 @@ tenant = Table(
     Column("retention_document_days", Integer, nullable=True),
     Column("retention_trace_days", Integer, nullable=True),
     Column("retention_run_event_days", Integer, nullable=True),
+    # LLM model allow-list (NC-795 G-42). Empty = no restriction. Model ids
+    # as the provider names them, '*' globs allowed; matched app-side.
+    Column(
+        "llm_allowed_models",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),

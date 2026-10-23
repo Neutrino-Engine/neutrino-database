@@ -131,6 +131,7 @@ class Tenant(Base):
     retention_document_days: Mapped[Optional[int]]
     retention_trace_days: Mapped[Optional[int]]
     retention_run_event_days: Mapped[Optional[int]]
+    llm_allowed_models: Mapped[List[str]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
     deleted_at: Mapped[Optional[datetime]]
