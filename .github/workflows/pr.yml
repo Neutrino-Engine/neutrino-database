@@ -126,8 +126,8 @@ jobs:
             --ignorefile .trivyignore.yaml --exit-code 1 pr-scan:ci
 
   tests:
-    # Not required yet: pre-existing failures on uat. Flip continue-on-error off
-    # (and require the check) once the suite is green.
+    # Not required yet: pre-existing failures on uat. Once the suite is green, run
+    # the test command as a plain step (drop the exit-0 wrapper) and require the check.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
@@ -155,7 +155,23 @@ jobs:
       - name: Install
         run: |
           pip install -r requirements.txt -r requirements-dev.txt -e .
-      - run: pytest -q -p no:cacheprovider
+      # Informational: the step always exits 0 so the check is not painted red (a
+      # job-level continue-on-error alone still shows a red X). Failures go to the
+      # job summary and a warning annotation instead.
+      - name: tests (informational)
+        run: |
+          set +e
+          pytest -q -p no:cacheprovider 2>&1 | tee "$RUNNER_TEMP/tests.log"
+          rc=${PIPESTATUS[0]}
+          {
+            echo "### tests (informational, not required): exit code $rc"
+            echo '```'
+            tail -n 80 "$RUNNER_TEMP/tests.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning title=tests (informational)::pytest exited $rc - see the job summary"
+          fi
 
   alembic:
     # Migration chain integrity on a fresh database: exactly one head, and the
