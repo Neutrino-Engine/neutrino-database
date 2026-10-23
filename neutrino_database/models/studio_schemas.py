@@ -196,6 +196,10 @@ class TeamConfig(_Strict):
     # redaction and promotion paths can branch on a column (decision 29).
     sensitive: bool = False
     approver_ids: list[UUID] = Field(default_factory=list)
+    # G-34 confused deputy: when runs_as is owner or service, only the team
+    # owner, workspace admins and these members may start a run. Ignored for
+    # runs_as=invoker (the run carries the starter's own access).
+    allowed_runner_ids: list[UUID] = Field(default_factory=list)
     # wait — pause for a human; deny — unattended runs refuse the write instead.
     approval_policy: Literal["wait", "deny"] = "wait"
     approval_timeout_s: int = Field(72 * 3600, ge=60)
