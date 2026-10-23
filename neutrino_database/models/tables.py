@@ -505,6 +505,11 @@ tenant = Table(
     # 30 days. Default 50 covers real teams; enterprise raises it via a
     # one-row UPDATE rather than a code change.
     Column("max_workspaces", Integer, nullable=False, server_default=text("50")),
+    # ADLC WS5 (D21) — run data retention; audit + version rows are kept forever.
+    Column("run_retention_days", Integer, nullable=False, server_default=text("180")),
+    Column("sensitive_retention_days", Integer, nullable=False, server_default=text("30")),
+    # ADLC WS5 (D41) — concurrent studio + workflow runs; excess runs queue.
+    Column("max_concurrent_runs", Integer, nullable=False, server_default=text("10")),
     # Owner-controlled domain allowlist for invitations (NEU-X4).
     # Empty array = no restriction (anyone can be invited). Non-empty
     # = invitations rejected unless the invitee's email domain is in
@@ -1400,6 +1405,16 @@ workspace = Table(
         nullable=False,
         server_default=text("'{}'::jsonb"),
     ),
+    # ADLC WS2 — who unattended runs act as when a config says
+    # ``runs_as: owner`` / ``service`` with no user id. Configs carry the ROLE;
+    # each environment binds the person, so no user id travels in a package.
+    Column("automation_owner_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("service_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    # ADLC WS3 (D13/D22) — a protected workspace is import-only: no in-place
+    # edits, changes arrive as packages and land inactive. Activation there
+    # needs a second person unless the admin switches that off (audited).
+    Column("protected", Boolean, nullable=False, server_default=text("false")),
+    Column("two_person_activation", Boolean, nullable=False, server_default=text("true")),
     Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
@@ -4153,8 +4168,20 @@ workflow = Table(
     Column("name", String(255), nullable=False),
     Column("description", Text, nullable=True),
 
-    # The node/edge definition the GenericGraphWorkflow interprets.
+    # The node/edge definition the GenericGraphWorkflow interprets. This is
+    # the DRAFT: real runs execute ``active_version_id``'s frozen graph (ADLC).
     Column("graph", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # ADLC WS1 — the published version every real run executes. NULL = never
+    # published. Rollback moves this pointer.
+    Column(
+        "active_version_id",
+        UUID(as_uuid=False),
+        ForeignKey("workflow_version.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_workflow_active_version"),
+        nullable=True,
+    ),
+    # Stable identity across environments (export/import keeps it).
+    Column("lineage_id", UUID(as_uuid=False), nullable=False, server_default=text("gen_random_uuid()")),
 
     Column(
         "status",
@@ -4181,6 +4208,31 @@ workflow = Table(
 )
 
 
+# ADLC WS1 — an immutable published snapshot of ``workflow.graph``. Run-team
+# and run-agent nodes carry the exact dependency version they were published
+# against (``props.team_version_id`` / ``props.agent_version_id``).
+workflow_version = Table(
+    "workflow_version",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("graph", JSONB, nullable=False),
+    # sha256 of the canonical JSON graph; equal hash = same version.
+    Column("content_hash", String(64), nullable=False),
+    Column("change_note", Text, nullable=True),
+    Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    # ADLC WS3 — set when this version arrived in a package (provenance +
+    # the two-person rule's "importer" and "source author").
+    Column("import_id", UUID(as_uuid=False), ForeignKey("package_import.id", ondelete="SET NULL"), nullable=True),
+    UniqueConstraint("workflow_id", "version", name="uq_workflow_version"),
+    CheckConstraint("version >= 1", name="ck_workflow_version_positive"),
+)
+
+
 # ---------------------------------------------------------------------------
 # Workflow Execution pillar (WF-M1) — the run record.
 #
@@ -4203,8 +4255,18 @@ workflow_run = Table(
     Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
     Column("workflow_id", UUID(as_uuid=False), ForeignKey("workflow.id", ondelete="CASCADE"), nullable=False),
 
-    # workflow_version_id stays a bare UUID until M6 adds workflow_version.
-    Column("workflow_version_id", UUID(as_uuid=False), nullable=True),
+    # ADLC (D31, workflows) — a shadow run executes an inactive version on a
+    # real trigger input with every write stubbed and approvals skipped;
+    # ``shadow_of_run_id`` is the live run it is compared against.
+    Column("is_shadow", Boolean, nullable=False, server_default=text("false")),
+    Column("shadow_of_run_id", UUID(as_uuid=False), ForeignKey("workflow_run.id", ondelete="SET NULL"), nullable=True),
+    # The version this run executed; NULL = a draft (editor) run.
+    Column(
+        "workflow_version_id",
+        UUID(as_uuid=False),
+        ForeignKey("workflow_version.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
     # trigger_id now references workflow_trigger (M3a.2). SET NULL — deleting a
     # trigger keeps the run history, just unlinks it.
     Column(
@@ -4416,7 +4478,8 @@ workflow_trigger = Table(
 # ===========================================================================
 
 STUDIO_RUN_STATUSES = (
-    "planning", "dispatching", "waiting_approval", "paused", "finishing",
+    # queued: waiting for a tenant run slot (ADLC WS5, D41).
+    "queued", "planning", "dispatching", "waiting_approval", "paused", "finishing",
     "completed", "failed", "cancelled",
 )
 STUDIO_TASK_STATUSES = (
@@ -4429,6 +4492,146 @@ STUDIO_APPROVAL_OUTCOMES = ("allowed_once", "rejected", "cancelled", "unavailabl
 
 def _in(col: str, values) -> str:
     return f"{col} IN ({', '.join(repr(v) for v in values)})"
+
+
+# ADLC WS2 — named, workspace-scoped sets of people (D24). Approvals, gates,
+# workflow approval/form nodes and notification targets reference
+# ``group:<key>``; the members are resolved when the request is raised.
+approver_group = Table(
+    "approver_group",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("key", String(64), nullable=False),
+    Column("name", String(200), nullable=False),
+    Column("description", Text, nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    UniqueConstraint("workspace_id", "key", name="uq_approver_group_key"),
+    CheckConstraint("key ~ '^[a-z][a-z0-9-]{0,63}$'", name="ck_approver_group_key"),
+)
+
+
+approver_group_member = Table(
+    "approver_group_member",
+    metadata,
+    Column("group_id", UUID(as_uuid=False), ForeignKey("approver_group.id", ondelete="CASCADE"), primary_key=True),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), primary_key=True),
+    Column("added_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("added_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+)
+
+
+# ADLC WS3 — packages. A package is a signed JSON bundle of a root object
+# (workflow | team | agent) and every dependency, with environment-specific
+# ids replaced by logical refs. These tables record trust and provenance.
+
+# D12/D34: one-click forward promotion inside a tenant (Dev -> UAT -> Live).
+promotion_path = Table(
+    "promotion_path",
+    metadata,
+    Column("source_workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True),
+    Column("target_workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("updated_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint("source_workspace_id <> target_workspace_id", name="ck_promotion_path_distinct"),
+)
+
+
+# D20: public keys whose bundles this tenant accepts. This deployment's own
+# key is always trusted and is not stored here.
+package_trusted_key = Table(
+    "package_trusted_key",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("name", String(200), nullable=False),
+    # sha256 of the raw public key, hex; what a bundle's signature names.
+    Column("key_id", String(64), nullable=False),
+    Column("public_key", Text, nullable=False),
+    Column("added_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("added_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("tenant_id", "key_id", name="uq_package_trusted_key"),
+)
+
+
+package_import = Table(
+    "package_import",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("bundle_sha256", String(64), nullable=False),
+    # {deployment_id, key_id, tenant_id, workspace_id, workspace_name,
+    #  exported_by_email, exported_at}
+    Column("source", JSONB, nullable=False),
+    # {kind, lineage_id, name, version}
+    Column("root", JSONB, nullable=False),
+    Column("bindings", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # {objects:[{kind, lineage_id, version, target_id, version_id, reused}],
+    #  blocked:[...reasons activation is refused...], warnings:[...]}
+    Column("result", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("imported_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("imported_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Index("ix_package_import_workspace", "workspace_id", "imported_at"),
+)
+
+
+# ADLC WS4 (D17) — one execution of a subject's test suite. Publish and
+# activation read the result instead of running cases inside the request.
+studio_gate_run = Table(
+    "studio_gate_run",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("subject_kind", String(8), nullable=False),
+    Column("subject_id", UUID(as_uuid=False), nullable=False),
+    # NULL = the draft; else the version under test.
+    Column("version_id", UUID(as_uuid=False), nullable=True),
+    # publish | manual | model_remap | import
+    Column("reason", String(16), nullable=False),
+    Column("status", String(16), nullable=False, server_default=text("'queued'")),
+    # {cases:[{case_id, name, trials:[{run_id, passed, failures:[...], judge:{score, reason}}], passed}],
+    #  passed, total, min_cases_met}
+    Column("results", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("error", Text, nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("finished_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("subject_kind IN ('agent','team')", name="ck_studio_gate_run_subject"),
+    CheckConstraint("status IN ('queued','running','passed','failed','error')", name="ck_studio_gate_run_status"),
+    Index("ix_studio_gate_run_subject", "subject_kind", "subject_id", "created_at"),
+)
+
+
+# ADLC WS5 (D40) — thumbs + comment on any run; thumbs-down and failed runs
+# land in the workspace review queue, whence one click makes a test case.
+run_feedback = Table(
+    "run_feedback",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("run_kind", String(16), nullable=False),
+    Column("run_id", UUID(as_uuid=False), nullable=False),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("rating", String(8), nullable=False),
+    Column("comment", Text, nullable=True),
+    Column("review_status", String(16), nullable=False, server_default=text("'open'")),
+    Column("reviewed_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("reviewed_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("test_case_id", UUID(as_uuid=False), ForeignKey("studio_test_case.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint("run_kind IN ('studio','workflow')", name="ck_run_feedback_kind"),
+    CheckConstraint("rating IN ('up','down')", name="ck_run_feedback_rating"),
+    CheckConstraint("review_status IN ('open','dismissed','converted')", name="ck_run_feedback_review"),
+    UniqueConstraint("run_kind", "run_id", "user_id", name="uq_run_feedback_user"),
+    Index("ix_run_feedback_queue", "workspace_id", "review_status", "created_at"),
+)
 
 
 studio_agent = Table(
@@ -4449,6 +4652,15 @@ studio_agent = Table(
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    # ADLC WS1 — the version real runs execute; rollback moves it.
+    Column(
+        "active_version_id",
+        UUID(as_uuid=False),
+        ForeignKey("studio_agent_version.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_studio_agent_active_version"),
+        nullable=True,
+    ),
+    Column("lineage_id", UUID(as_uuid=False), nullable=False, server_default=text("gen_random_uuid()")),
     CheckConstraint("length(name) > 0", name="ck_studio_agent_name_not_blank"),
     Index("ix_studio_agent_workspace", "tenant_id", "workspace_id", postgresql_where=text("deleted_at IS NULL")),
     Index("ix_studio_agent_name", "workspace_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
@@ -4470,6 +4682,13 @@ studio_agent_version = Table(
     Column("override_reason", Text, nullable=True),
     Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("content_hash", String(64), nullable=True),
+    Column("change_note", Text, nullable=True),
+    # ADLC WS3 — set when this version arrived in a package (provenance +
+    # the two-person rule's "importer" and "source author").
+    Column("import_id", UUID(as_uuid=False), ForeignKey("package_import.id", ondelete="SET NULL"), nullable=True),
+    # ADLC WS4 — the gate run that admitted this version.
+    Column("gate_run_id", UUID(as_uuid=False), ForeignKey("studio_gate_run.id", ondelete="SET NULL"), nullable=True),
     UniqueConstraint("agent_id", "version", name="uq_studio_agent_version"),
     CheckConstraint("version >= 1", name="ck_studio_agent_version_positive"),
     CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_agent_version_gate"),
@@ -4503,6 +4722,15 @@ studio_team = Table(
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    # ADLC WS1 — the version real runs execute; rollback moves it.
+    Column(
+        "active_version_id",
+        UUID(as_uuid=False),
+        ForeignKey("studio_team_version.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_studio_team_active_version"),
+        nullable=True,
+    ),
+    Column("lineage_id", UUID(as_uuid=False), nullable=False, server_default=text("gen_random_uuid()")),
     CheckConstraint("length(name) > 0", name="ck_studio_team_name_not_blank"),
     Index("ix_studio_team_workspace", "tenant_id", "workspace_id", postgresql_where=text("deleted_at IS NULL")),
     Index("ix_studio_team_name", "workspace_id", "name", unique=True, postgresql_where=text("deleted_at IS NULL")),
@@ -4524,6 +4752,13 @@ studio_team_version = Table(
     Column("override_reason", Text, nullable=True),
     Column("published_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("published_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("content_hash", String(64), nullable=True),
+    Column("change_note", Text, nullable=True),
+    # ADLC WS3 — set when this version arrived in a package (provenance +
+    # the two-person rule's "importer" and "source author").
+    Column("import_id", UUID(as_uuid=False), ForeignKey("package_import.id", ondelete="SET NULL"), nullable=True),
+    # ADLC WS4 — the gate run that admitted this version.
+    Column("gate_run_id", UUID(as_uuid=False), ForeignKey("studio_gate_run.id", ondelete="SET NULL"), nullable=True),
     UniqueConstraint("team_id", "version", name="uq_studio_team_version"),
     CheckConstraint("version >= 1", name="ck_studio_team_version_positive"),
     CheckConstraint(_in("test_gate_status", ("passed", "overridden")), name="ck_studio_team_version_gate"),
@@ -4628,6 +4863,11 @@ studio_run = Table(
     Column("team_config", JSONB, nullable=False),
     Column("status", String(32), nullable=False, server_default=text("'planning'")),
     Column("is_test", Boolean, nullable=False, server_default=text("false")),
+    # ADLC WS4 (D31) — a shadow run executes an inactive version on a real
+    # input with every write stubbed and approvals skipped; ``shadow_of_run_id``
+    # is the live run it is compared against.
+    Column("is_shadow", Boolean, nullable=False, server_default=text("false")),
+    Column("shadow_of_run_id", UUID(as_uuid=False), ForeignKey("studio_run.id", ondelete="SET NULL"), nullable=True),
     # Trigger attribution (decision 4 / 27). One of the four ids is set.
     Column("trigger_kind", String(16), nullable=False),
     Column("trigger_actor_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
@@ -4780,6 +5020,16 @@ studio_test_case = Table(
     # the run workspace at files/<filename>, which is what an input field like
     # document_path names.
     Column("files", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    # ADLC WS3 (D29): the case's files are synthetic, so they may travel in a
+    # package even when the team is sensitive. Real data never leaves.
+    Column("synthetic", Boolean, nullable=False, server_default=text("false")),
+    # ADLC WS4 (D17/D38) — repeated trials (all must pass), an optional
+    # LLM-judge rubric, and the case's purpose.
+    Column("trials", Integer, nullable=False, server_default=text("1")),
+    Column("judge_rubric", Text, nullable=True),
+    Column("kind", String(16), nullable=False, server_default=text("'regular'")),
+    # The run this case was saved from (D19 "save this run as a test case").
+    Column("source_run_id", UUID(as_uuid=False), nullable=True),
     # [{path, op, expected}] evaluated against the output after schema validation.
     Column("assertions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("last_result", String(16), nullable=False, server_default=text("'never_run'")),
