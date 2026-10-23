@@ -537,11 +537,25 @@ tenant = Table(
     # NC-795 G-30: local-password users must complete TOTP MFA. Existing
     # tenants default off; new-tenant creation sets it on app-side.
     Column("require_mfa_local", Boolean, nullable=False, server_default=text("false")),
+    # Per-tenant retention in days (NC-795 G-44). NULL = keep forever unless the
+    # gateway's RETENTION_DEFAULT_* setting gives a default. Swept daily by the
+    # gateway retention runner through each service's /internal/retention.
+    Column("retention_chat_days", Integer, nullable=True),
+    Column("retention_file_days", Integer, nullable=True),
+    Column("retention_document_days", Integer, nullable=True),
+    Column("retention_trace_days", Integer, nullable=True),
+    Column("retention_run_event_days", Integer, nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
     Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
 
     CheckConstraint("egress_mode IN ('monitor', 'enforce')", name="ck_tenant_egress_mode"),
+    CheckConstraint(
+        "COALESCE(retention_chat_days, 1) > 0 AND COALESCE(retention_file_days, 1) > 0"
+        " AND COALESCE(retention_document_days, 1) > 0 AND COALESCE(retention_trace_days, 1) > 0"
+        " AND COALESCE(retention_run_event_days, 1) > 0",
+        name="ck_tenant_retention_positive",
+    ),
     Index("ix_tenant_status", "status"),
     Index("ix_tenant_created_at", "created_at"),
 )
@@ -1786,6 +1800,42 @@ excel_datasets = Table(
 # product-level specification and event-type catalog.
 # ---------------------------------------------------------------------------
 
+# Right-to-erasure requests (NC-795 G-21). One row per user / workspace /
+# tenant erasure; the gateway retention runner drives each through every
+# service's /internal/erasure and records per-service progress in ``steps``,
+# so a crashed or failed run resumes where it stopped.
+erasure_request = Table(
+    "erasure_request",
+    metadata,
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("scope", Text, nullable=False),
+    # No FK: the target is what gets erased.
+    Column("target_id", UUID(as_uuid=False), nullable=False),
+    Column("requested_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    # Grace window: the runner leaves the request alone until then, and it
+    # can still be cancelled.
+    Column("not_before", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("steps", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+    Column("completed_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("scope IN ('user', 'workspace', 'tenant')", name="ck_erasure_request_scope"),
+    CheckConstraint(
+        "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
+        name="ck_erasure_request_status",
+    ),
+    Index("ix_erasure_request_due", "status", "not_before"),
+    Index(
+        "ux_erasure_request_open_target", "scope", "target_id", unique=True,
+        postgresql_where=text("status IN ('pending', 'running')"),
+    ),
+)
+
+
 audit_log = Table(
     "audit_log",
     metadata,
@@ -1811,8 +1861,10 @@ audit_log = Table(
     # Renamed from `metadata` to avoid clashing with SA DeclarativeBase.metadata.
     Column("event_metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
 
-    # Optional client-side context. PII-tagged so the C6 anonymization runner
-    # can wipe these when the actor is erased.
+    # Optional client-side context, PII-tagged. Covered by the hash chain and the
+    # append-only trigger, so erasure cannot wipe them: they are kept under the
+    # security-logging lawful basis (NC-795 G-21). Erasure scrubs the user row
+    # instead, so actor ids stop resolving to a person.
     Column("ip_address", INET, nullable=True, comment="pii:ipaddress"),
     Column("user_agent", Text, nullable=True, comment="pii:freetext"),
 
