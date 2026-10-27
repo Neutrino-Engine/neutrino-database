@@ -21,6 +21,7 @@ def test_columns_and_primary_key():
     assert {c.name for c in t.columns} == {
         "integration_id",
         "allowed_schemas",
+        "row_scoped",
         "created_at",
         "updated_at",
     }
@@ -41,6 +42,13 @@ def test_allowed_schemas_is_nullable():
     # NULL = unrestricted (every schema visible/queryable); list = allowlist.
     # Same semantics as the legacy da_connection.allowed_schemas it replaces.
     assert tables.integration_da_config.c.allowed_schemas.nullable is True
+
+
+def test_row_scoped_defaults_off():
+    # Existing connections keep running as the connection's own login.
+    col = tables.integration_da_config.c.row_scoped
+    assert col.nullable is False
+    assert "false" in str(col.server_default.arg)
 
 
 def test_orm_maps_to_table():
