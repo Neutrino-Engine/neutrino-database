@@ -4329,7 +4329,7 @@ integration_da_config = Table(
     #   list[str] → allowlist; only these schemas surface + run via execute_query.
     Column("allowed_schemas", JSONB, nullable=True),
     # NC-826: run each query as the signed-in user so the warehouse's
-    # row-level security applies. Operator-set only, not via the admin API.
+    # row-level security applies. Set by tenant admins or the operator script.
     Column("row_scoped", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column(
