@@ -3614,8 +3614,20 @@ dashboard_widget = Table(
         onupdate=func.now(),
         nullable=False,
     ),
+    # Soft delete (NC-789). A removed widget keeps its row — query, title and
+    # last position — so it can be restored to the same board. Every live read
+    # filters ``deleted_at IS NULL``. SET NULL on user deletion, like
+    # ``dashboard.owner_id``: keep the row, lose attribution.
+    Column("deleted_at", TIMESTAMP(timezone=True), nullable=True),
+    Column(
+        "deleted_by",
+        UUID(as_uuid=False),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
 
-    # Canonical render-time query — every dashboard load hits this.
+    # Canonical render-time query — every dashboard load hits this. Also serves
+    # restore and the recently-removed list, which read deleted rows by board.
     Index("ix_dashboard_widget_dashboard", "dashboard_id"),
     # Reverse lookup: "which dashboards hold this chat chart?" — asked by the
     # chat card on render, so it needs to be an index and not a scan. Partial,
@@ -3898,9 +3910,10 @@ dashboard_proposal_state = Table(
         ),
         nullable=False,
     ),
-    # The widget this proposal produced. SET NULL on widget delete so the row
-    # never dangles; ``state`` is flipped to ``removed`` by the delete path,
-    # which is what preserves the "was applied once" fact.
+    # The widget this proposal produced. Widget deletes are soft (NC-789), so
+    # the delete path flips ``state`` to ``removed`` and KEEPS this id — restore
+    # reads it to flip the card back to ``applied``. SET NULL still covers the
+    # widget row actually going away (its dashboard deleted).
     Column(
         "widget_id",
         UUID(as_uuid=False),

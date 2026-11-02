@@ -389,6 +389,25 @@ class TestDashboardWidgetTable:
         assert _ondelete(msg_fk) == "SET NULL"
 
     @pytest.mark.asyncio
+    async def test_soft_delete_columns(self, test_engine):
+        # NC-789 — a removed widget keeps its row so it can be restored.
+        # Nullable: NULL is a live widget.
+        cols = await _columns(test_engine, "dashboard_widget")
+        for name in ("deleted_at", "deleted_by"):
+            assert name in cols, f"dashboard_widget.{name} missing"
+            assert cols[name]["nullable"], f"dashboard_widget.{name} must be nullable"
+
+    @pytest.mark.asyncio
+    async def test_deleted_by_set_null_on_user_delete(self, test_engine):
+        fks = await _foreign_keys(test_engine, "dashboard_widget")
+        user_fk = next(
+            (fk for fk in fks if fk["referred_table"] == "user"), None
+        )
+        assert user_fk is not None, "dashboard_widget.deleted_by → user FK missing"
+        assert user_fk["constrained_columns"] == ["deleted_by"]
+        assert _ondelete(user_fk) == "SET NULL"
+
+    @pytest.mark.asyncio
     async def test_dashboard_id_index(self, test_engine):
         # `WHERE dashboard_id = ?` is the canonical render-time query.
         indexes = await _indexes(test_engine, "dashboard_widget")
