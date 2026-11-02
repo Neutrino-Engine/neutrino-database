@@ -1678,6 +1678,7 @@ class IntegrationDAConfig(Base):
 
     integration_id: Mapped[str]
     allowed_schemas: Mapped[Optional[list]]
+    row_scoped: Mapped[bool]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 
