@@ -4341,8 +4341,9 @@ integration_da_config = Table(
     #   NULL      → unrestricted; every warehouse schema is visible/queryable.
     #   list[str] → allowlist; only these schemas surface + run via execute_query.
     Column("allowed_schemas", JSONB, nullable=True),
-    # NC-826: run each query as the signed-in user so the warehouse's
-    # row-level security applies. Set by tenant admins or the operator script.
+    # NC-826: connector-service sets the signed-in user's email on each query's
+    # transaction so the warehouse's row-level security applies; the login stays
+    # the same. Set by tenant admins or the operator script.
     Column("row_scoped", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column(
