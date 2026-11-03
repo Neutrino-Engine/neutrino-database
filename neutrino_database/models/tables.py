@@ -3177,7 +3177,7 @@ da_row_rule = Table(
     "da_row_rule",
     metadata,
 
-    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")),
     Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
     Column(
         "da_catalog_table_id",
@@ -3186,7 +3186,9 @@ da_row_rule = Table(
         nullable=False,
     ),
     Column("column_name", String(255), nullable=False),
-    Column("parent_rule_id", UUID(as_uuid=False), ForeignKey("da_row_rule.id", ondelete="CASCADE"), nullable=True),
+    # NO ACTION: deleting a parent with linked rules fails, so it cannot silently unfence
+    # them; a connection or workspace delete removes both in one statement and passes.
+    Column("parent_rule_id", UUID(as_uuid=False), ForeignKey("da_row_rule.id", ondelete="NO ACTION"), nullable=True),
     Column("parent_column_name", String(255), nullable=True),
     Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
@@ -3196,6 +3198,7 @@ da_row_rule = Table(
         "(parent_rule_id IS NULL) = (parent_column_name IS NULL)",
         name="ck_da_row_rule_link_complete",
     ),
+    CheckConstraint("parent_rule_id <> id", name="ck_da_row_rule_not_self_linked"),
     UniqueConstraint("workspace_id", "da_catalog_table_id", name="ux_da_row_rule_workspace_table"),
 )
 
@@ -3204,7 +3207,7 @@ da_member_row_value = Table(
     "da_member_row_value",
     metadata,
 
-    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")),
     Column("rule_id", UUID(as_uuid=False), ForeignKey("da_row_rule.id", ondelete="CASCADE"), nullable=False),
     Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
     Column("value", Text, nullable=False),
@@ -4557,7 +4560,7 @@ workflow_run = Table(
         ),
         nullable=False,
     ),
-    Column("audit_principal_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="RESTRICT"), nullable=False),
+    Column("audit_principal_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="NO ACTION"), nullable=False),
 
     Column("temporal_run_id", Text, nullable=True),
     Column("trigger_payload", JSONB, nullable=True),

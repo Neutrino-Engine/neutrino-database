@@ -14,12 +14,12 @@ def test_rule_fks_cascade_with_workspace_and_catalog():
     t = tables.da_row_rule
     assert _fk(t, "workspace_id") == ("workspace", "CASCADE")
     assert _fk(t, "da_catalog_table_id") == ("da_catalog_table", "CASCADE")
-    assert _fk(t, "parent_rule_id") == ("da_row_rule", "CASCADE")
+    assert _fk(t, "parent_rule_id") == ("da_row_rule", "NO ACTION")
 
 
 def test_one_rule_per_table_per_workspace():
     names = {c.name for c in tables.da_row_rule.constraints}
-    assert {"ux_da_row_rule_workspace_table", "ck_da_row_rule_link_complete"} <= names
+    assert {"ux_da_row_rule_workspace_table", "ck_da_row_rule_link_complete", "ck_da_row_rule_not_self_linked"} <= names
 
 
 def test_values_cascade_with_rule_and_user():
