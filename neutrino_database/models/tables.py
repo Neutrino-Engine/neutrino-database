@@ -3164,6 +3164,62 @@ workspace_da_access_grant = Table(
 
 
 # ---------------------------------------------------------------------------
+# da_row_rule / da_member_row_value — per-member row rules (NC-845).
+#
+# The workspace admin picks the column that filters a catalog table; each
+# member gets values for it. connector-service fences every ruled table in
+# the agent's SQL, so nothing is written to the customer's database. A
+# linked rule (parent_rule_id set) has no values of its own: it keeps a row
+# when its column_name matches parent_column_name of a visible parent row.
+# ---------------------------------------------------------------------------
+
+da_row_rule = Table(
+    "da_row_rule",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "da_catalog_table_id",
+        UUID(as_uuid=False),
+        ForeignKey("da_catalog_table.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("column_name", String(255), nullable=False),
+    # NO ACTION: deleting a parent with linked rules fails, so it cannot silently unfence
+    # them; a connection or workspace delete removes both in one statement and passes.
+    Column("parent_rule_id", UUID(as_uuid=False), ForeignKey("da_row_rule.id", ondelete="NO ACTION"), nullable=True),
+    Column("parent_column_name", String(255), nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+
+    CheckConstraint(
+        "(parent_rule_id IS NULL) = (parent_column_name IS NULL)",
+        name="ck_da_row_rule_link_complete",
+    ),
+    CheckConstraint("parent_rule_id <> id", name="ck_da_row_rule_not_self_linked"),
+    UniqueConstraint("workspace_id", "da_catalog_table_id", name="ux_da_row_rule_workspace_table"),
+)
+
+
+da_member_row_value = Table(
+    "da_member_row_value",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")),
+    Column("rule_id", UUID(as_uuid=False), ForeignKey("da_row_rule.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("value", Text, nullable=False),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    UniqueConstraint("rule_id", "user_id", "value", name="ux_da_member_row_value"),
+    Index("ix_da_member_row_value_user", "user_id"),
+)
+
+
+# ---------------------------------------------------------------------------
 # metric — Entity 5 (§4.8).
 #
 # Workspace-scoped business metric. Independent HITL lifecycle (admin
@@ -4517,7 +4573,7 @@ workflow_run = Table(
         ),
         nullable=False,
     ),
-    Column("audit_principal_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="RESTRICT"), nullable=False),
+    Column("audit_principal_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="NO ACTION"), nullable=False),
 
     Column("temporal_run_id", Text, nullable=True),
     Column("trigger_payload", JSONB, nullable=True),

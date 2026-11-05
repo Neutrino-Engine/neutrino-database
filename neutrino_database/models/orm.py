@@ -1368,6 +1368,39 @@ class WorkspaceDAAccessGrant(Base):
     updated_at: Mapped[datetime]
 
 
+class DARowRule(Base):
+    """The column that filters a catalog table for members (NC-845).
+
+    ``parent_rule_id`` set = a linked rule: a row is visible when its
+    ``column_name`` matches ``parent_column_name`` of a visible parent row.
+    """
+
+    __table__ = tables.da_row_rule
+
+    id: Mapped[str]
+    workspace_id: Mapped[str]
+    da_catalog_table_id: Mapped[str]
+    column_name: Mapped[str]
+    parent_rule_id: Mapped[Optional[str]]
+    parent_column_name: Mapped[Optional[str]]
+    created_by: Mapped[Optional[str]]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class DAMemberRowValue(Base):
+    """One value a member may see for a row rule (NC-845)."""
+
+    __table__ = tables.da_member_row_value
+
+    id: Mapped[str]
+    rule_id: Mapped[str]
+    user_id: Mapped[str]
+    value: Mapped[str]
+    created_by: Mapped[Optional[str]]
+    created_at: Mapped[datetime]
+
+
 class Metric(Base):
     """Workspace-scoped business metric.
 
