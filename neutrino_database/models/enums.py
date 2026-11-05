@@ -560,8 +560,8 @@ class DashboardProposalStateEnum(str, Enum):
     removed   — was applied, then the widget was deleted from the canvas.
                 Distinct from never-applied: the build chat must NOT offer
                 "Apply" again, or deleting a widget reads as an invitation to
-                re-add it. Widget deletes are hard deletes, so this row is the
-                only surviving record that the proposal ever landed.
+                re-add it. Widget deletes are soft (NC-789): ``widget_id`` is
+                kept, and restoring the widget flips the row back to applied.
     dismissed — the admin explicitly declined the proposal.
     """
     APPLIED = "applied"

@@ -1500,6 +1500,9 @@ class DashboardWidget(Base):
     source_artifact_id: Mapped[Optional[str]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
+    # Soft delete (NC-789): set = removed from the canvas, restorable.
+    deleted_at: Mapped[Optional[datetime]]
+    deleted_by: Mapped[Optional[str]]
 
 
 class DashboardLinkToken(Base):
