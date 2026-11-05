@@ -6,7 +6,7 @@ fences ruled tables in the agent's SQL; nothing is written to the
 customer's database.
 
 Revision ID: a7d3f5e9c2b1
-Revises: 9c4d2e7f1b38
+Revises: e3a7c9d1f5b2
 Create Date: 2026-11-03
 """
 import sqlalchemy as sa
@@ -14,7 +14,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
 revision = "a7d3f5e9c2b1"
-down_revision = "9c4d2e7f1b38"
+down_revision = "e3a7c9d1f5b2"
 branch_labels = None
 depends_on = None
 
