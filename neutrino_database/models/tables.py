@@ -3218,6 +3218,25 @@ da_member_row_value = Table(
     Index("ix_da_member_row_value_user", "user_id"),
 )
 
+# A range a member may see for a row rule (NC-845): min_value <= column <= max_value,
+# either bound open. Number and date columns only (agent-platform checks); the bounds
+# are text, cast to the column's type by connector-service like the exact values.
+da_member_row_range = Table(
+    "da_member_row_range",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")),
+    Column("rule_id", UUID(as_uuid=False), ForeignKey("da_row_rule.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="CASCADE"), nullable=False),
+    Column("min_value", Text, nullable=True),
+    Column("max_value", Text, nullable=True),
+    Column("created_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    CheckConstraint("min_value IS NOT NULL OR max_value IS NOT NULL", name="ck_da_member_row_range_bounded"),
+    Index("ix_da_member_row_range_user", "user_id"),
+)
+
 
 # ---------------------------------------------------------------------------
 # metric — Entity 5 (§4.8).
@@ -4573,7 +4592,7 @@ workflow_run = Table(
         ),
         nullable=False,
     ),
-    Column("audit_principal_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="NO ACTION"), nullable=False),
+    Column("audit_principal_user_id", UUID(as_uuid=False), ForeignKey("user.id", ondelete="RESTRICT"), nullable=False),
 
     Column("temporal_run_id", Text, nullable=True),
     Column("trigger_payload", JSONB, nullable=True),

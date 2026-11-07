@@ -1401,6 +1401,20 @@ class DAMemberRowValue(Base):
     created_at: Mapped[datetime]
 
 
+class DAMemberRowRange(Base):
+    """A range a member may see for a row rule (NC-845); either bound may be open."""
+
+    __table__ = tables.da_member_row_range
+
+    id: Mapped[str]
+    rule_id: Mapped[str]
+    user_id: Mapped[str]
+    min_value: Mapped[Optional[str]]
+    max_value: Mapped[Optional[str]]
+    created_by: Mapped[Optional[str]]
+    created_at: Mapped[datetime]
+
+
 class Metric(Base):
     """Workspace-scoped business metric.
 

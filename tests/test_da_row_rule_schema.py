@@ -34,3 +34,13 @@ def test_orm_maps_to_tables():
 
     assert DARowRule.__table__ is tables.da_row_rule
     assert DAMemberRowValue.__table__ is tables.da_member_row_value
+
+
+def test_ranges_cascade_and_need_a_bound():
+    from neutrino_database.models.orm import DAMemberRowRange
+
+    t = tables.da_member_row_range
+    assert DAMemberRowRange.__table__ is t
+    assert _fk(t, "rule_id") == ("da_row_rule", "CASCADE")
+    assert _fk(t, "user_id") == ("user", "CASCADE")
+    assert "ck_da_member_row_range_bounded" in {c.name for c in t.constraints}
