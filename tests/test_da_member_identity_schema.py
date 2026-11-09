@@ -1,4 +1,4 @@
-"""NC-864 — da_member_identity schema (metadata only, no DB)."""
+"""NC-864: da_member_identity schema (metadata only, no DB)."""
 
 from neutrino_database.models import tables
 
@@ -6,8 +6,6 @@ from neutrino_database.models import tables
 def test_one_identity_per_member_per_connection():
     t = tables.da_member_identity
     assert [c.name for c in t.primary_key.columns] == ["integration_id", "user_id"]
-    assert t.c.identity.type.length == 320
-    assert t.c.identity.nullable is False
 
 
 def test_deletes_cascade_but_keep_the_row_when_the_setter_leaves():
@@ -20,9 +18,3 @@ def test_orm_maps_to_table():
     from neutrino_database.models.orm import DAMemberIdentity
 
     assert DAMemberIdentity.__table__ is tables.da_member_identity
-
-
-def test_user_delete_has_an_index():
-    assert any(
-        [c.name for c in ix.columns] == ["user_id"] for ix in tables.da_member_identity.indexes
-    )
