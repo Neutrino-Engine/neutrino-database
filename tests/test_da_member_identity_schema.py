@@ -20,3 +20,9 @@ def test_orm_maps_to_table():
     from neutrino_database.models.orm import DAMemberIdentity
 
     assert DAMemberIdentity.__table__ is tables.da_member_identity
+
+
+def test_user_delete_has_an_index():
+    assert any(
+        [c.name for c in ix.columns] == ["user_id"] for ix in tables.da_member_identity.indexes
+    )

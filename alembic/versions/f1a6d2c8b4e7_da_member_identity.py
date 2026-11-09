@@ -32,6 +32,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.TIMESTAMP(timezone=True),
                   server_default=sa.func.now(), nullable=False),
     )
+    op.create_index("ix_da_member_identity_user_id", "da_member_identity", ["user_id"])
 
 
 def downgrade() -> None:

@@ -4343,7 +4343,7 @@ integration_da_config = Table(
     Column("allowed_schemas", JSONB, nullable=True),
     # NC-826: connector-service sets the signed-in user's email on each query's
     # transaction so the warehouse's row-level security applies; the login stays
-    # the same. Set by tenant admins or the operator script.
+    # the same. Set by tenant admins.
     Column("row_scoped", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column(
@@ -4378,6 +4378,8 @@ da_member_identity = Table(
         onupdate=func.now(),
         nullable=False,
     ),
+    # user_id is second in the primary key, so a user delete needs its own index.
+    Index("ix_da_member_identity_user_id", "user_id"),
 )
 
 # ---------------------------------------------------------------------------
