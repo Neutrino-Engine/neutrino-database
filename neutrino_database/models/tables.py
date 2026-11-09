@@ -4351,10 +4351,10 @@ integration_da_config = Table(
     Column("row_scope_mode", String(20), nullable=False, server_default=text("'native'")),
     Column("identity_source", JSONB, nullable=True),
     Column("multi_match_policy", String(20), nullable=False,
-           server_default=text("'require_approval'")),
+           server_default=text("'confirm'")),
     CheckConstraint("row_scope_mode IN ('native', 'identity_table')",
                     name="ck_integration_da_config_row_scope_mode"),
-    CheckConstraint("multi_match_policy IN ('deny', 'require_approval', 'allow_all')",
+    CheckConstraint("multi_match_policy IN ('deny', 'confirm', 'allow_all')",
                     name="ck_integration_da_config_multi_match_policy"),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column(
@@ -4415,19 +4415,21 @@ da_rls_table_status = Table(
 )
 
 
-# NC-864 phase 2: an admin's approval of the exact key set a shared login email
-# matched. A different key set later means the approval no longer applies.
-da_rls_identity_approval = Table(
-    "da_rls_identity_approval",
+# NC-864 phase 2: when a login email matches several identity-table rows, an
+# admin confirms which of them (confirmed_keys) the member may see. matched_keys
+# is what the email matched at that time; a different match later voids it.
+da_rls_confirmed_keys = Table(
+    "da_rls_confirmed_keys",
     metadata,
 
     Column("integration_id", UUID(as_uuid=False),
            ForeignKey("integration.id", ondelete="CASCADE"), primary_key=True),
     Column("login_email", String(320), primary_key=True),
-    Column("approved_keys", JSONB, nullable=False),
-    Column("approved_by", UUID(as_uuid=False),
+    Column("confirmed_keys", JSONB, nullable=False),
+    Column("matched_keys", JSONB, nullable=False),
+    Column("confirmed_by", UUID(as_uuid=False),
            ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
-    Column("approved_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column("confirmed_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
 )
 
 # ---------------------------------------------------------------------------
@@ -5655,8 +5657,8 @@ runbook_version = Table(
     Column("edited_by", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("submitted_at", TIMESTAMP(timezone=True), nullable=True),
-    Column("approved_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
-    Column("approved_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("confirmed_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("confirmed_at", TIMESTAMP(timezone=True), nullable=True),
     Column("retired_at", TIMESTAMP(timezone=True), nullable=True),
 
     CheckConstraint("status IN ('draft', 'in_review', 'approved', 'retired')", name="ck_runbook_version_status"),

@@ -1716,16 +1716,17 @@ class DARlsTableStatus(Base):
     reviewed_at: Mapped[Optional[datetime]]
 
 
-class DARlsIdentityApproval(Base):
-    """NC-864 phase 2: an approved key set for a login email that matched several rows."""
+class DARlsConfirmedKeys(Base):
+    """NC-864 phase 2: the keys an admin confirmed for a login email that matched several rows."""
 
-    __table__ = tables.da_rls_identity_approval
+    __table__ = tables.da_rls_confirmed_keys
 
     integration_id: Mapped[str]
     login_email: Mapped[str]
-    approved_keys: Mapped[list]
-    approved_by: Mapped[Optional[str]]
-    approved_at: Mapped[datetime]
+    confirmed_keys: Mapped[list]
+    matched_keys: Mapped[list]
+    confirmed_by: Mapped[Optional[str]]
+    confirmed_at: Mapped[datetime]
 
 
 class Workflow(Base):
