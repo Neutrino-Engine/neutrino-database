@@ -1682,6 +1682,9 @@ class IntegrationDAConfig(Base):
     integration_id: Mapped[str]
     allowed_schemas: Mapped[Optional[list]]
     row_scoped: Mapped[bool]
+    row_scope_mode: Mapped[str]
+    identity_source: Mapped[Optional[dict]]
+    multi_match_policy: Mapped[str]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 
@@ -1697,6 +1700,32 @@ class DAMemberIdentity(Base):
     set_by: Mapped[Optional[str]]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
+
+
+class DARlsTableStatus(Base):
+    """NC-864 phase 2: one warehouse table's status in identity-table mode."""
+
+    __table__ = tables.da_rls_table_status
+
+    integration_id: Mapped[str]
+    schema_name: Mapped[str]
+    table_name: Mapped[str]
+    status: Mapped[str]
+    path: Mapped[Optional[list]]
+    reviewed_by: Mapped[Optional[str]]
+    reviewed_at: Mapped[Optional[datetime]]
+
+
+class DARlsIdentityApproval(Base):
+    """NC-864 phase 2: an approved key set for a login email that matched several rows."""
+
+    __table__ = tables.da_rls_identity_approval
+
+    integration_id: Mapped[str]
+    login_email: Mapped[str]
+    approved_keys: Mapped[list]
+    approved_by: Mapped[Optional[str]]
+    approved_at: Mapped[datetime]
 
 
 class Workflow(Base):

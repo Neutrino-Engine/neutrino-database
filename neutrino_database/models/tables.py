@@ -4345,6 +4345,17 @@ integration_da_config = Table(
     # transaction so the warehouse's row-level security applies; the login stays
     # the same. Set by tenant admins.
     Column("row_scoped", Boolean, nullable=False, server_default=text("false")),
+    # NC-864 phase 2: "native" (the warehouse's own RLS, above) or "identity_table"
+    # (Neutrino looks the login email up in identity_source and rewrites each
+    # SELECT to that key). identity_source = {schema, table, match_column, key_column}.
+    Column("row_scope_mode", String(20), nullable=False, server_default=text("'native'")),
+    Column("identity_source", JSONB, nullable=True),
+    Column("multi_match_policy", String(20), nullable=False,
+           server_default=text("'require_approval'")),
+    CheckConstraint("row_scope_mode IN ('native', 'identity_table')",
+                    name="ck_integration_da_config_row_scope_mode"),
+    CheckConstraint("multi_match_policy IN ('deny', 'require_approval', 'allow_all')",
+                    name="ck_integration_da_config_multi_match_policy"),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column(
         "updated_at",
@@ -4380,6 +4391,43 @@ da_member_identity = Table(
     ),
     # user_id is second in the primary key, so a user delete needs its own index.
     Index("ix_da_member_identity_user_id", "user_id"),
+)
+
+
+# NC-864 phase 2, identity-table mode: each warehouse table's status and its
+# foreign-key path to the identity key. A table with no path starts blocked.
+da_rls_table_status = Table(
+    "da_rls_table_status",
+    metadata,
+
+    Column("integration_id", UUID(as_uuid=False),
+           ForeignKey("integration.id", ondelete="CASCADE"), primary_key=True),
+    Column("schema_name", String(255), primary_key=True),
+    Column("table_name", String(255), primary_key=True),
+    Column("status", String(20), nullable=False),
+    # Ordered hops to the key: [{"table", "column", "parent_table", "parent_column"}].
+    Column("path", JSONB, nullable=True),
+    Column("reviewed_by", UUID(as_uuid=False),
+           ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("reviewed_at", TIMESTAMP(timezone=True), nullable=True),
+    CheckConstraint("status IN ('protected', 'reference', 'blocked')",
+                    name="ck_da_rls_table_status_status"),
+)
+
+
+# NC-864 phase 2: an admin's approval of the exact key set a shared login email
+# matched. A different key set later means the approval no longer applies.
+da_rls_identity_approval = Table(
+    "da_rls_identity_approval",
+    metadata,
+
+    Column("integration_id", UUID(as_uuid=False),
+           ForeignKey("integration.id", ondelete="CASCADE"), primary_key=True),
+    Column("login_email", String(320), primary_key=True),
+    Column("approved_keys", JSONB, nullable=False),
+    Column("approved_by", UUID(as_uuid=False),
+           ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("approved_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
 )
 
 # ---------------------------------------------------------------------------

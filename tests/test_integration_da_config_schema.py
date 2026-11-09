@@ -22,6 +22,9 @@ def test_columns_and_primary_key():
         "integration_id",
         "allowed_schemas",
         "row_scoped",
+        "row_scope_mode",
+        "identity_source",
+        "multi_match_policy",
         "created_at",
         "updated_at",
     }
