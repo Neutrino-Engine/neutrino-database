@@ -1698,6 +1698,7 @@ class DAMemberIdentity(Base):
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 
+
 class Workflow(Base):
     """Workspace-scoped workflow definition (WF-VS2).
 
