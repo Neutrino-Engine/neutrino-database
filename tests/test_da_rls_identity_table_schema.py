@@ -19,3 +19,7 @@ def test_one_status_per_table_and_one_confirmation_per_email():
 def test_orm_maps_to_tables():
     assert orm.DARlsTableStatus.__table__ is tables.da_rls_table_status
     assert orm.DARlsConfirmedKeys.__table__ is tables.da_rls_confirmed_keys
+
+
+def test_runbook_versions_keep_their_approval_columns():
+    assert {"approved_by", "approved_at"} <= {c.name for c in tables.runbook_version.columns}

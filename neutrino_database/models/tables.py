@@ -5657,8 +5657,8 @@ runbook_version = Table(
     Column("edited_by", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
     Column("submitted_at", TIMESTAMP(timezone=True), nullable=True),
-    Column("confirmed_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
-    Column("confirmed_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("approved_by", UUID(as_uuid=False), ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("approved_at", TIMESTAMP(timezone=True), nullable=True),
     Column("retired_at", TIMESTAMP(timezone=True), nullable=True),
 
     CheckConstraint("status IN ('draft', 'in_review', 'approved', 'retired')", name="ck_runbook_version_status"),
