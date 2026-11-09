@@ -1686,6 +1686,18 @@ class IntegrationDAConfig(Base):
     updated_at: Mapped[datetime]
 
 
+class DAMemberIdentity(Base):
+    """NC-864: the warehouse identity a member acts as on one connection."""
+
+    __table__ = tables.da_member_identity
+
+    integration_id: Mapped[str]
+    user_id: Mapped[str]
+    identity: Mapped[str]
+    set_by: Mapped[Optional[str]]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
 class Workflow(Base):
     """Workspace-scoped workflow definition (WF-VS2).
 

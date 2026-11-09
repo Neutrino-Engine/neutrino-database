@@ -6,14 +6,14 @@ warehouse's row-level security policies apply. Existing connections are
 unaffected.
 
 Revision ID: c3e8a1f4d7b6
-Revises: 9c4d2e7f1b38
+Revises: e3a7c9d1f5b2
 Create Date: 2026-10-28
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "c3e8a1f4d7b6"
-down_revision = "9c4d2e7f1b38"
+down_revision = "e3a7c9d1f5b2"
 branch_labels = None
 depends_on = None
 

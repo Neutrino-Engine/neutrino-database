@@ -4356,6 +4356,30 @@ integration_da_config = Table(
 )
 
 
+# NC-864: the warehouse identity a member acts as on a row-scoped connection.
+# No row means the member acts as their own email. Keyed by the integration,
+# not a workspace: a tenant connection is shared across workspaces.
+da_member_identity = Table(
+    "da_member_identity",
+    metadata,
+
+    Column("integration_id", UUID(as_uuid=False),
+           ForeignKey("integration.id", ondelete="CASCADE"), primary_key=True),
+    Column("user_id", UUID(as_uuid=False),
+           ForeignKey("user.id", ondelete="CASCADE"), primary_key=True),
+    Column("identity", String(320), nullable=False),
+    Column("set_by", UUID(as_uuid=False),
+           ForeignKey("user.id", ondelete="SET NULL"), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+    Column(
+        "updated_at",
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
 # ---------------------------------------------------------------------------
 # workflow — workspace-scoped workflow definitions (WF-VS2).
 #
