@@ -4,8 +4,10 @@ FROM python:3.11-slim@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies. The upgrade takes Debian security fixes newer
+# than the pinned base image.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y \
     libpq-dev \
     gcc \
     && rm -rf /var/lib/apt/lists/*
