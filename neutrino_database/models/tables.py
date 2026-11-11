@@ -5435,6 +5435,36 @@ alert_episode = Table(
     Index("ix_alert_episode_status", "workspace_id", "status", text("last_event_at DESC")),
 )
 
+# incident_report: one row per customer-facing incident report version
+# (NC-877). Derived facts only: ticket id, version, kind, tier, severity and the
+# snapshot hash that made the version. No report text is stored; ServiceOps
+# keeps the ticket and the report is rebuilt on demand.
+incident_report = Table(
+    "incident_report",
+    metadata,
+
+    Column("id", UUID(as_uuid=False), primary_key=True, default=uuid.uuid4),
+    Column("tenant_id", UUID(as_uuid=False), ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False),
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False),
+    Column("ticket_id", BigInteger, nullable=False),
+    Column("version", Integer, nullable=False),
+    # initial / update / watchdog / rca / digest
+    Column("kind", String(16), nullable=False),
+    # report / digest
+    Column("tier", String(16), nullable=False),
+    Column("snapshot_hash", Text, nullable=False),
+    Column("customer_id", Text, nullable=True),
+    Column("severity", String(8), nullable=True),
+    Column("group_key", Text, nullable=True),
+    Column("reasons", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("sent_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+
+    UniqueConstraint("workspace_id", "ticket_id", "snapshot_hash", name="uq_incident_report_snapshot"),
+    UniqueConstraint("workspace_id", "ticket_id", "version", name="uq_incident_report_version"),
+    Index("ix_incident_report_tier_sent", "workspace_id", "tier", "sent_at"),
+)
+
 alert_fingerprint = Table(
     "alert_fingerprint",
     metadata,
