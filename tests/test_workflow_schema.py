@@ -149,3 +149,12 @@ class TestWorkflowIndexes:
         indexes = await _indexes(test_engine, "workflow")
         cols = [tuple(ix["column_names"]) for ix in indexes]
         assert ("tenant_id", "workspace_id") in cols
+
+
+async def test_workflow_show_in_chat_defaults_true(test_engine) -> None:
+    """NC-920 — show_in_chat lists the workflow in the chat menus; existing
+    rows and new ones default to listed."""
+    cols = await _columns(test_engine, "workflow")
+    assert "show_in_chat" in cols
+    assert cols["show_in_chat"]["nullable"] is False
+    assert "true" in str(cols["show_in_chat"]["default"]).lower()
