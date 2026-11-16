@@ -1704,6 +1704,7 @@ class Workflow(Base):
     graph: Mapped[dict]
     status: Mapped[WorkflowStatusEnum]
     created_by: Mapped[Optional[str]]
+    show_in_chat: Mapped[bool]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 
