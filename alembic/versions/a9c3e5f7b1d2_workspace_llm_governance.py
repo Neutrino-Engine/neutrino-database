@@ -5,7 +5,7 @@ new table. Downgrade writes the table values back to the active provider rows.
 providers.model_config["governance"] stays for one release.
 
 Revision ID: a9c3e5f7b1d2
-Revises: f4b8d2a6c1e9
+Revises: e5a9c3f7b1d4
 Create Date: 2026-11-12
 """
 import sqlalchemy as sa
@@ -13,7 +13,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "a9c3e5f7b1d2"
-down_revision = "f4b8d2a6c1e9"
+down_revision = "e5a9c3f7b1d4"
 branch_labels = None
 depends_on = None
 
