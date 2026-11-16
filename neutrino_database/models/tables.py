@@ -1616,6 +1616,18 @@ workspace_llm_spend = Table(
     Index("ix_workspace_llm_spend_user_period", "user_id", "period"),
 )
 
+# The PII governance setting of one workspace (NC-892). Every LLM call in the
+# workspace uses it, whatever provider row serves the call. Same shape as
+# agent-platform GovernanceConfig.to_dict(). No row = deployment default.
+# providers.model_config["governance"] is no longer read; drop it next release.
+workspace_llm_governance = Table(
+    "workspace_llm_governance",
+    metadata,
+    Column("workspace_id", UUID(as_uuid=False), ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True),
+    Column("governance", JSONB, nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=func.now(), nullable=False),
+)
+
 
 workspace_access_request = Table(
     "workspace_access_request",
