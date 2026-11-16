@@ -4411,6 +4411,9 @@ workflow = Table(
     ),
     # Stable identity across environments (export/import keeps it).
     Column("lineage_id", UUID(as_uuid=False), nullable=False, server_default=text("gen_random_uuid()")),
+    # NC-920 — listed in the chat composer's `/` and `@` menus. False hides an
+    # internal workflow from those menus only: chat can still run it by name.
+    Column("show_in_chat", Boolean, nullable=False, server_default=text("true")),
 
     Column(
         "status",

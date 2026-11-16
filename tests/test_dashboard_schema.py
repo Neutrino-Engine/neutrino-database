@@ -176,6 +176,7 @@ class TestDashboardEnums:
             "ad_hoc",
             "dashboard_build",
             "workflow_build",
+            "canvas_thread",
         }, (
             "chat_kind enum separates ad-hoc Q&A from the build threads behind "
             "a dashboard (D6) and a workflow. Drafts in the Library are chat "

@@ -581,10 +581,14 @@ class ChatKindEnum(str, Enum):
                       Workflow (linked via ``chat.workflow_id``). One row
                       per workflow; lets the builder resume where the
                       user left off across reloads.
+    canvas_thread   — comments on a canvas that ran apart from the
+                      owner's canvas chat (NC-881). Linked via
+                      ``chat.dashboard_id``; hidden from Recents.
     """
     AD_HOC = "ad_hoc"
     DASHBOARD_BUILD = "dashboard_build"
     WORKFLOW_BUILD = "workflow_build"
+    CANVAS_THREAD = "canvas_thread"
 
 
 class DAAccessResourceTypeEnum(str, Enum):
